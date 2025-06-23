@@ -1,0 +1,33 @@
+{
+    "name": "your-vendor/advanced-file-upload",
+    "description": "A comprehensive file upload package for Laravel with cloud storage and image processing",
+    "type": "library",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "YourVendor\\AdvancedFileUpload\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "YourVendor\\AdvancedFileUpload\\AdvancedFileUploadServiceProvider"
+            ],
+            "aliases": {
+                "FileUpload": "YourVendor\\AdvancedFileUpload\\Facades\\FileUpload"
+            }
+        }
+    },
+    "require": {
+        "php": "^8.0",
+        "laravel/framework": "^9.0|^10.0|^11.0",
+        "intervention/image": "^2.7",
+        "pion/laravel-chunk-upload": "^2.0",
+        "spatie/laravel-google-cloud-storage": "^2.0",
+        "league/flysystem-aws-s3-v3": "^3.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^9.5",
+        "orchestra/testbench": "^7.0"
+    }
+}
