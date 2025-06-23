@@ -1,13 +1,13 @@
 <?php
 
-namespace YourVendor\AdvancedFileUpload\Tests\Feature;
+namespace MohamedSamy902\AdvancedFileUpload\Tests\Feature;
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Orchestra\Testbench\TestCase;
-use YourVendor\AdvancedFileUpload\AdvancedFileUploadServiceProvider;
-use YourVendor\AdvancedFileUpload\Facades\FileUpload;
+use MohamedSamy902\AdvancedFileUpload\AdvancedFileUploadServiceProvider;
+use MohamedSamy902\AdvancedFileUpload\Facades\FileUpload;
 
 class FileUploadTest extends TestCase
 {
@@ -21,7 +21,7 @@ class FileUploadTest extends TestCase
     protected function getPackageAliases($app)
     {
         return [
-            'FileUpload' => \YourVendor\AdvancedFileUpload\Facades\FileUpload::class,
+            'FileUpload' => \MohamedSamy902\AdvancedFileUpload\Facades\FileUpload::class,
         ];
     }
 

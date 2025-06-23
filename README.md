@@ -80,7 +80,7 @@ Edit `config/file-upload.php` to customize:
 ### Upload via Controller
 
 ```php
-use YourVendor\AdvancedFileUpload\Facades\FileUpload;
+use MohamedSamy902\AdvancedFileUpload\Facades\FileUpload;
 
 public function uploadFile(Request $request)
 {

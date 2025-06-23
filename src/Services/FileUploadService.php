@@ -1,6 +1,6 @@
 <?php
 
-namespace YourVendor\AdvancedFileUpload\Services;
+namespace MohamedSamy902\AdvancedFileUpload\Services;
 
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;

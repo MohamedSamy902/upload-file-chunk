@@ -1,6 +1,6 @@
 <?php
 
-namespace YourVendor\AdvancedFileUpload;
+namespace MohamedSamy902\AdvancedFileUpload;
 
 use Illuminate\Support\ServiceProvider;
 
