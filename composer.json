@@ -22,7 +22,7 @@
         "php": "^8.0",
         "laravel/framework": "^9.0|^10.0|^11.0|^12.0",
         "intervention/image": "^2.7",
-        "pion/laravel-chunk-upload": "^2.0",
+        "pion/laravel-chunk-upload": "^1.5",
         "spatie/laravel-google-cloud-storage": "^2.0",
         "league/flysystem-aws-s3-v3": "^3.0"
     },
