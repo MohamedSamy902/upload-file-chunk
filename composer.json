@@ -1,20 +1,20 @@
 {
-    "name": "your-vendor/advanced-file-upload",
+    "name": "mohamedsamy902/advanced-file-upload",
     "description": "A comprehensive file upload package for Laravel with cloud storage and image processing",
     "type": "library",
     "license": "MIT",
     "autoload": {
         "psr-4": {
-            "YourVendor\\AdvancedFileUpload\\": "src/"
+            "MohamedSamy902\\AdvancedFileUpload\\": "src/"
         }
     },
     "extra": {
         "laravel": {
             "providers": [
-                "YourVendor\\AdvancedFileUpload\\AdvancedFileUploadServiceProvider"
+                "MohamedSamy902\\AdvancedFileUpload\\AdvancedFileUploadServiceProvider"
             ],
             "aliases": {
-                "FileUpload": "YourVendor\\AdvancedFileUpload\\Facades\\FileUpload"
+                "FileUpload": "MohamedSamy902\\AdvancedFileUpload\\Facades\\FileUpload"
             }
         }
     },
