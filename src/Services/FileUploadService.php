@@ -10,38 +10,332 @@ use Pion\Laravel\ChunkUpload\Handler\HandlerFactory;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\Http;
 use Exception;
+use Symfony\Component\Mime\MimeTypes;
+use Illuminate\Support\Facades\Log;
 
 class FileUploadService
 {
-    public function upload(Request $request, string $fieldName = 'file', array $options = [])
+    public function upload($fileOrRequest, array $options = [])
     {
         $config = config('file-upload');
         $disk = $config['storage']['disk'];
-        $path = $this->generatePath($config['storage']['path'], $config['storage']['organize_by']);
+        $basePath = $config['storage']['path'];
+        $folderName = $options['folder_name'] ?? $config['storage']['default_folder'];
+        $path = $this->generatePath($basePath, $folderName);
 
-        // Check quota if enabled
-        if ($config['quota']['enabled']) {
-            $this->checkQuota($request->file($fieldName));
+        // Handle URL-based upload (single or multiple URLs)
+        if (isset($options['url'])) {
+            return $this->handleUrlUpload($options['url'], $path, $disk, $options);
         }
 
-        // Handle chunked upload
+        // Handle chunked upload from request
+        if ($fileOrRequest instanceof Request) {
+            return $this->handleRequestUpload($fileOrRequest, $path, $disk, $options);
+        }
+
+        // dd('d');
+        // Handle direct file or array of files upload
+        return $this->handleDirectUpload($fileOrRequest, $path, $disk, $options);
+    }
+
+    protected function handleUrlUpload($urls, string $path, string $disk, array $options)
+    {
+        if (is_array($urls)) {
+            $results = [];
+            foreach ($urls as $url) {
+                try {
+                    $results[] = $this->processUrlUpload($url, $path, $disk, $options);
+                } catch (Exception $e) {
+                    $results[] = [
+                        'error' => $e->getMessage(),
+                        'url' => $url,
+                        'status' => false
+                    ];
+                }
+            }
+            return $results;
+        }
+
+        return $this->processUrlUpload($urls, $path, $disk, $options);
+    }
+
+    protected function processUrlUpload(string $url, string $path, string $disk, array $options)
+    {
+        try {
+            $config = config('file-upload');
+
+            // Use chunked download for large files if enabled
+            if ($config['url_download']['chunked'] ?? true) {
+                $file = $this->chunkedDownloadFromUrl($url, $options);
+            } else {
+                $file = $this->simpleDownloadFromUrl($url, $options);
+            }
+
+            if (!$file instanceof UploadedFile || !$file->isValid()) {
+                throw new Exception('فشل تنزيل الملف أو الملف غير صالح');
+            }
+
+            if ($config['quota']['enabled']) {
+                $this->checkQuota($file);
+            }
+
+            return $this->saveFile($file, $path, $disk, $options);
+        } catch (Exception $e) {
+            throw new Exception('فشل تنزيل الملف من الرابط: ' . $e->getMessage());
+        }
+    }
+
+    protected function chunkedDownloadFromUrl(string $url, array $options): UploadedFile
+    {
+        $timeout = $options['timeout'] ?? config('file-upload.url_download.timeout', 300);
+        $maxSize = $options['max_size'] ?? config('file-upload.url_download.max_size', 1024 * 1024 * 500); // 500MB default
+        $chunkSize = $options['chunk_size'] ?? config('file-upload.url_download.chunk_size', 1024 * 1024 * 5); // 5MB chunks
+
+        $tempDir = sys_get_temp_dir();
+        $tempName = Str::uuid();
+        $tempPath = "{$tempDir}/{$tempName}";
+        $fileHandle = null; // <-- أضف هذا السطر
+
+        try {
+            $bytesDownloaded = 0;
+            $startByte = 0;
+            $fileHandle = fopen($tempPath, 'w');
+
+            do {
+                $endByte = $startByte + $chunkSize - 1;
+                $response = Http::timeout($timeout)
+                    ->withHeaders([
+                        'Range' => "bytes={$startByte}-{$endByte}",
+                        'Accept' => '*/*'
+                    ])
+                    ->get($url);
+
+                if ($response->failed()) {
+                    // If range not supported, try full download
+                    if ($response->status() === 416 || $startByte > 0) {
+                        throw new Exception('الخادم لا يدعم التحميل المجزأ');
+                    }
+
+                    // Fallback to normal download
+                    if (is_resource($fileHandle)) {
+                        fclose($fileHandle);
+                    }
+                    return $this->simpleDownloadFromUrl($url, $options);
+                }
+
+                $chunkData = $response->body();
+                $bytesWritten = fwrite($fileHandle, $chunkData);
+                $bytesDownloaded += $bytesWritten;
+                $startByte += $bytesWritten;
+
+                if ($bytesDownloaded > $maxSize) {
+                    throw new Exception('حجم الملف يتجاوز الحد المسموح به');
+                }
+
+                $contentRange = $response->header('Content-Range');
+                $totalSize = $contentRange ? (int) explode('/', $contentRange)[1] : null;
+            } while (!$totalSize || $bytesDownloaded < $totalSize);
+
+            if (is_resource($fileHandle)) {
+                fclose($fileHandle);
+            }
+
+            // Determine file info
+            $mimeType = $this->detectMimeType($tempPath, $response->header('Content-Type'));
+            $extension = $this->getExtensionFromMime($mimeType, $url);
+            $originalName = pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_FILENAME) ?: $tempName;
+
+            // Rename with proper extension
+            $finalPath = "{$tempPath}.{$extension}";
+            rename($tempPath, $finalPath);
+
+            return new UploadedFile(
+                $finalPath,
+                "{$originalName}.{$extension}",
+                $mimeType,
+                null,
+                true
+            );
+        } catch (Exception $e) {
+            // Clean up
+            if (is_resource($fileHandle)) {
+                fclose($fileHandle);
+            }
+            if (file_exists($tempPath)) {
+                unlink($tempPath);
+            }
+            if (isset($finalPath) && file_exists($finalPath)) {
+                unlink($finalPath);
+            }
+
+            throw new Exception('خطأ في التحميل المجزأ: ' . $e->getMessage());
+        }
+    }
+
+    protected function simpleDownloadFromUrl(string $url, array $options): UploadedFile
+    {
+        try {
+            $timeout = $options['timeout'] ?? config('file-upload.url_download.timeout', 30);
+            $maxSize = $options['max_size'] ?? config('file-upload.url_download.max_size', 1024 * 1024 * 50); // 50MB default
+
+            $response = Http::timeout($timeout)
+                ->withHeaders(['Accept' => '*/*'])
+                ->get($url);
+
+            if ($response->failed()) {
+                throw new Exception('فشل تنزيل الملف من الرابط: ' . $response->status());
+            }
+
+            // Check file size
+            if (strlen($response->body()) > $maxSize) {
+                throw new Exception('حجم الملف يتجاوز الحد المسموح به');
+            }
+
+            $contentType = $response->header('Content-Type');
+            $extension = $this->getExtensionFromMime($contentType, $url);
+            $originalName = pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_FILENAME);
+            $tempName = Str::uuid() . ($originalName ? '_' . $originalName : '');
+            $tempPath = sys_get_temp_dir() . '/' . $tempName . '.' . $extension;
+
+            if (!file_put_contents($tempPath, $response->body())) {
+                throw new Exception('فشل حفظ الملف المؤقت');
+            }
+
+            return new UploadedFile(
+                $tempPath,
+                "{$originalName}.{$extension}",
+                $contentType,
+                null,
+                true
+            );
+        } catch (Exception $e) {
+            if (isset($tempPath) && file_exists($tempPath)) {
+                unlink($tempPath);
+            }
+            throw new Exception('خطأ أثناء تنزيل الملف: ' . $e->getMessage());
+        }
+    }
+
+    protected function handleRequestUpload(Request $request, string $path, string $disk, array $options)
+    {
+        $config = config('file-upload');
+        $fieldName = $options['field_name'] ?? 'file';
+
         $receiver = new FileReceiver($fieldName, $request, HandlerFactory::classFromRequest($request));
         if ($receiver->isUploaded()) {
             $save = $receiver->receive();
             if ($save->isFinished()) {
-                return $this->saveFile($save->getFile(), $path, $disk, $options);
+                $file = $save->getFile();
+                if ($config['quota']['enabled']) {
+                    $this->checkQuota($file);
+                }
+                return $this->saveFile($file, $path, $disk, $options);
             }
             $handler = $save->handler();
-            return response()->json(['done' => $handler->getPercentageDone(), 'status' => true]);
+            return response()->json([
+                'done' => $handler->getPercentageDone(),
+                'status' => true
+            ]);
         }
 
-        // Handle standard upload
-        $file = $request->file($fieldName);
-        if (!$file) {
-            throw new Exception('لا يوجد ملف مرفوع');
+        // Handle multiple files
+        $files = $request->file('files') ?? $request->file($fieldName);
+        if (is_array($files)) {
+            $results = [];
+            foreach ($files as $file) {
+                if ($file instanceof UploadedFile && $file->isValid()) {
+                    if ($config['quota']['enabled']) {
+                        $this->checkQuota($file);
+                    }
+                    $results[] = $this->saveFile($file, $path, $disk, $options);
+                }
+            }
+            return $results;
         }
+
+        $file = $request->file($fieldName);
+        if (!$file instanceof UploadedFile || !$file->isValid()) {
+            throw new Exception('الملف غير صالح');
+        }
+
+        if ($config['quota']['enabled']) {
+            $this->checkQuota($file);
+        }
+
         return $this->saveFile($file, $path, $disk, $options);
+    }
+
+    protected function handleDirectUpload($file, string $path, string $disk, array $options)
+    {
+        $config = config('file-upload');
+
+        if (is_array($file)) {
+            $results = [];
+            foreach ($file as $singleFile) {
+                if ($singleFile instanceof UploadedFile && $singleFile->isValid()) {
+                    if ($config['quota']['enabled']) {
+                        $this->checkQuota($singleFile);
+                    }
+                    $results[] = $this->saveFile($singleFile, $path, $disk, $options);
+                }
+            }
+            return $results;
+        }
+
+        if (!$file instanceof UploadedFile || !$file->isValid()) {
+            throw new Exception('الملف غير صالح');
+        }
+
+        if ($config['quota']['enabled']) {
+            $this->checkQuota($file);
+        }
+
+        return $this->saveFile($file, $path, $disk, $options);
+    }
+
+    protected function detectMimeType(string $filePath, ?string $contentType): string
+    {
+        $fileInfo = new \finfo(FILEINFO_MIME_TYPE);
+        $detected = $fileInfo->file($filePath);
+
+        if ($detected && $detected !== 'application/octet-stream') {
+            return $detected;
+        }
+
+        if ($contentType) {
+            return explode(';', $contentType)[0];
+        }
+
+        return 'application/octet-stream';
+    }
+
+    protected function getExtensionFromMime(string $mime, string $url): string
+    {
+        $mimeTypes = new MimeTypes();
+        $extensions = $mimeTypes->getExtensions($mime);
+
+        if (!empty($extensions)) {
+            return $extensions[0];
+        }
+
+        $commonTypes = [
+            'image/jpeg' => 'jpg',
+            'image/png' => 'png',
+            'image/gif' => 'gif',
+            'image/webp' => 'webp',
+            'video/mp4' => 'mp4',
+            'video/quicktime' => 'mov',
+            'video/x-msvideo' => 'avi',
+            'video/x-matroska' => 'mkv',
+            'video/webm' => 'webm',
+            'application/pdf' => 'pdf',
+            'application/msword' => 'doc',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
+        ];
+
+        return $commonTypes[$mime] ?? pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_EXTENSION) ?: 'bin';
     }
 
     protected function saveFile(UploadedFile $file, string $path, string $disk, array $options)
@@ -52,27 +346,35 @@ class FileUploadService
         $fileName = Str::uuid() . '.' . ($options['convert_to'] ?? $extension);
         $fullPath = $path . '/' . $fileName;
 
-        // Validate file
-        $this->validateFile($file, $mime);
+        $this->validateFile($file, $mime, $options['field_name'] ?? 'file');
 
-        // Process file content
         $content = file_get_contents($file->getRealPath());
+
+        // Process only if it's an image and image processing is enabled
         if (str_starts_with($mime, 'image') && $config['processing']['image']['enabled']) {
-            $content = $this->processImage($content, $config['processing']['image'], $options);
-        } elseif ($config['compression']['enabled'] && in_array($extension, $config['compression']['types'])) {
+            try {
+                $content = $this->processImage($content, $config['processing']['image'], $options);
+            } catch (Exception $e) {
+                Log::warning('Image processing failed: ' . $e->getMessage());
+                // Continue with original content if processing fails
+            }
+        }
+        // Don't attempt to compress videos or other large files
+        elseif (
+            $config['compression']['enabled'] &&
+            in_array($extension, $config['compression']['types']) &&
+            !str_starts_with($mime, 'video')
+        ) {
             $content = $this->compressFile($content, $extension, $config['compression']['quality']);
         }
 
-        // Save file to storage
         Storage::disk($disk)->put($fullPath, $content);
 
-        // Generate thumbnails for images
         $thumbnailUrls = [];
         if (str_starts_with($mime, 'image') && $config['thumbnails']['enabled']) {
             $thumbnailUrls = $this->generateThumbnails($fullPath, $disk, $content, $config['thumbnails']['sizes']);
         }
 
-        // Store in database if enabled
         $fileData = [];
         if ($config['database']['enabled']) {
             $modelClass = $config['database']['model'];
@@ -82,27 +384,54 @@ class FileUploadService
                 'mime_type' => $mime,
                 'size' => $file->getSize(),
                 'user_id' => auth()->id(),
+                'type' => $this->getFileType($mime),
             ])->toArray();
         }
 
-        // Prepare response
         $url = $this->getFileUrl($config, $disk, $fullPath);
         return array_merge([
             'path' => $fullPath,
             'url' => $url,
             'thumbnail_urls' => $thumbnailUrls,
             'mime_type' => $mime,
+            'type' => $this->getFileType($mime),
         ], $fileData);
     }
 
-    protected function validateFile(UploadedFile $file, string $mimeType)
+    protected function getFileType(string $mime): string
+    {
+        if (str_starts_with($mime, 'image')) {
+            return 'image';
+        }
+        if (str_starts_with($mime, 'video')) {
+            return 'video';
+        }
+        if (str_starts_with($mime, 'audio')) {
+            return 'audio';
+        }
+        if ($mime === 'application/pdf') {
+            return 'pdf';
+        }
+        if (in_array($mime, [
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        ])) {
+            return 'document';
+        }
+
+        return 'other';
+    }
+
+    protected function validateFile(UploadedFile $file, string $mimeType, string $fieldName = 'file')
     {
         $rules = config('file-upload.validation');
         $type = explode('/', $mimeType)[0];
-        $rule = $rules[$type] ?? $rules['other'];
-        $validator = Validator::make([$file->getClientOriginalName() => $file], [
-            $file->getClientOriginalName() => $rule,
+        $rule = $rules['custom_fields'][$fieldName] ?? ($rules[$type] ?? $rules['other']);
+
+        $validator = Validator::make([$fieldName => $file], [
+            $fieldName => $rule,
         ]);
+
         if ($validator->fails()) {
             throw new Exception($validator->errors()->first());
         }
@@ -112,7 +441,6 @@ class FileUploadService
     {
         $image = Image::make($content);
 
-        // Resize
         if (isset($config['resize']) && $config['resize']['width'] && $config['resize']['height']) {
             $image->resize(
                 $config['resize']['width'],
@@ -125,12 +453,10 @@ class FileUploadService
             );
         }
 
-        // Apply watermark
         if (isset($config['watermark']) && $config['watermark']) {
             $image->insert($config['watermark']);
         }
 
-        // Apply filters
         if (isset($config['filters']) && !empty($config['filters'])) {
             foreach ($config['filters'] as $filter => $value) {
                 if (method_exists($image, $filter)) {
@@ -139,7 +465,6 @@ class FileUploadService
             }
         }
 
-        // Convert format
         $format = $options['convert_to'] ?? $config['convert_to'];
         if ($format) {
             $image->encode($format);
@@ -166,8 +491,6 @@ class FileUploadService
 
     protected function compressFile($content, string $extension, int $quality)
     {
-        // Placeholder for compression logic
-        // Requires additional libraries like ZipArchive for documents
         return $content;
     }
 
@@ -188,14 +511,10 @@ class FileUploadService
         }
     }
 
-    protected function generatePath(string $basePath, string $organizeBy)
+    protected function generatePath(string $basePath, string $folderName)
     {
-        if ($organizeBy === 'date') {
-            return $basePath . '/' . now()->format('Y/m/d');
-        } elseif ($organizeBy === 'user' && auth()->check()) {
-            return $basePath . '/users/' . auth()->id();
-        }
-        return $basePath;
+        $path = trim($basePath . '/' . $folderName, '/');
+        return $path;
     }
 
     protected function getFileUrl(array $config, string $disk, string $path)
@@ -209,15 +528,19 @@ class FileUploadService
 
     public function delete($idOrPath)
     {
+
         $config = config('file-upload');
         $disk = $config['storage']['disk'];
 
         if ($config['database']['enabled']) {
             $modelClass = $config['database']['model'];
-            $file = $modelClass::findOrFail($idOrPath);
+            // تحقق إذا كان id أو path
+            $file = is_numeric($idOrPath)
+                ? $modelClass::findOrFail($idOrPath)
+                : $modelClass::where('path', $idOrPath)->firstOrFail();
+
             Storage::disk($disk)->delete($file->path);
 
-            // Delete thumbnails
             if ($config['thumbnails']['enabled']) {
                 foreach ($config['thumbnails']['sizes'] as $sizeName => $size) {
                     $thumbnailPath = dirname($file->path) . "/thumb_{$sizeName}_" . $file->name;
@@ -229,7 +552,6 @@ class FileUploadService
         } else {
             Storage::disk($disk)->delete($idOrPath);
         }
-
         return ['status' => 'تم حذف الملف بنجاح'];
     }
 }
