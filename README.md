@@ -32,7 +32,7 @@
 1. **Install the package via Composer:**
 
    ```bash
-   composer require your-vendor/advanced-file-upload
+   composer require mohamedsamy902/uplade-file-chunk:dev-main
    ```
 
 2. **Publish the config file:**
@@ -86,6 +86,19 @@ public function uploadFile(Request $request)
 {
     $result = FileUpload::upload($request, 'profile_picture', [
         'convert_to' => 'webp',
+    ]);
+
+    return response()->json($result);
+}
+```
+
+### Download Image Or Video By Url
+
+```php
+public function download()
+{
+    $result = FileUpload::upload([], [
+      'url' => 'http://Example.com/vwdio.mp4',
     ]);
 
     return response()->json($result);
