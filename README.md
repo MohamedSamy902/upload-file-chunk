@@ -32,7 +32,7 @@
 1. **Install the package via Composer:**
 
    ```bash
-   composer require mohamedsamy902/uplade-file-chunk:dev-main
+   composer require mohamedsamy902/advanced-file-upload:dev-main
    ```
 
 2. **Publish the config file:**
