@@ -10,7 +10,7 @@ return [
             'url' => env('FILE_UPLOAD_CDN_URL', ''),
         ],
     ],
-    
+
     'validation' => [
         'image' => 'required|image|mimes:jpeg,png,jpg,gif,webp,svg|max:2048',
         'video' => 'required|mimes:mp4,mov,avi,mkv,webm|max:10240',
@@ -23,7 +23,7 @@ return [
             'files.*' => 'required|file|mimes:jpeg,png,jpg,gif,webp,svg,pdf,doc,docx,mp4,mov,avi,mkv,webm,mp3,wav,ogg|max:10240',
         ],
     ],
-    
+
     'url_download' => [
         'enabled' => true,
         'chunked' => true, // تمكين التحميل المجزأ للروابط
@@ -37,7 +37,7 @@ return [
             'document' => ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'],
         ],
     ],
-    
+
     'processing' => [
         'image' => [
             'enabled' => true,
@@ -71,13 +71,13 @@ return [
             'resolution' => '1280x720', // دقة الفيديو
         ],
     ],
-    
+
     'compression' => [
         'enabled' => false,
         'types' => ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx'],
         'quality' => 80,
     ],
-    
+
     'thumbnails' => [
         'enabled' => true,
         'sizes' => [
@@ -88,21 +88,21 @@ return [
         'for_videos' => false, // إنشاء ثيمب نيلز للفيديوهات (يتطلب FFmpeg)
         'seconds' => 5, // الثواني لأخذ لقطة من الفيديو
     ],
-    
+
     'quota' => [
         'enabled' => env('FILE_UPLOAD_QUOTA_ENABLED', false),
         'max_size_per_user' => 1073741824, // 1GB
         'check_method' => 'database', // يمكن أن يكون 'session' أو 'database'
     ],
-    
+
     'database' => [
         'enabled' => env('FILE_UPLOAD_DB_ENABLED', true),
-        'model' => \App\Models\FileUpload::class,
+        'model' => \MohamedSamy902\AdvancedFileUpload\Models\FileUpload::class,
         'table' => 'file_uploads', // اسم الجدول
         'prune_after' => 30, // عدد الأيام قبل حذف الملفات غير المستخدمة (null لتعطيل)
     ],
-    
-    
+
+
     'logging' => [
         'enabled' => true,
         'level' => 'info', // مستوى التسجيل
