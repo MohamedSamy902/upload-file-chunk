@@ -29,9 +29,13 @@ class FileUploadService
     {
         $config = config('file-upload');
         $disk = $options['disk'] ?? $config['storage']['disk']; // تقدر تحدد الديسك من الأوبشنز دلوقتي
-        $basePath = $config['storage']['path'];
+        $basePath = $options['disk'] ?? $config['storage']['path'];
         $folderName = $options['folder_name'] ?? $config['storage']['default_folder'];
-        $path = $this->generatePath($basePath, $folderName);
+        if ($folderName == null) {
+            $path = trim($basePath, '/');
+        } else {
+            $path = $this->generatePath($basePath, $folderName);
+        }
 
         // هنا بنستقبل قواعد الفاليديشن اللي جاية مع الريكويست، لو موجودة.
         $customValidationRules = $options['validation_rules'] ?? [];
@@ -115,7 +119,6 @@ class FileUploadService
 
             // حفظ الملف بعد التنزيل والمعالجة.
             return $this->saveFile($file, $path, $disk, $options, $customValidationRules);
-
         } catch (Exception $e) {
             // تنظيف الملف المؤقت لو حصل أي خطأ
             if ($file && file_exists($file->getRealPath())) {
@@ -127,128 +130,6 @@ class FileUploadService
     }
 
     /**
-     * بيحمل الملف من URL بشكل مجزأ (chunked) عشان الملفات الكبيرة.
-     *
-     * @param string $url الـ URL بتاع الملف.
-     * @param array $options خيارات التحميل (timeout, maxSize, chunkSize).
-     * @return UploadedFile كائن UploadedFile للملف اللي تم تحميله.
-     * @throws Exception لو حصل خطأ في التحميل المجزأ أو تجاوز الحجم الأقصى.
-     */
-    protected function chunkedDownloadFromUrl(string $url, array $options): UploadedFile
-    {
-        $timeout = $options['timeout'] ?? config('file-upload.url_download.timeout', 300);
-        $maxSize = $options['max_size'] ?? config('file-upload.url_download.max_size', 1024 * 1024 * 500); // 500MB default
-        $chunkSize = $options['chunk_size'] ?? config('file-upload.url_download.chunk_size', 1024 * 1024 * 5); // 5MB chunks
-
-        $tempDir = sys_get_temp_dir();
-        $tempName = Str::uuid();
-        $tempPath = "{$tempDir}/{$tempName}";
-        $fileHandle = null;
-
-        try {
-            $bytesDownloaded = 0;
-            $startByte = 0;
-            $fileHandle = fopen($tempPath, 'w');
-
-            if ($fileHandle === false) {
-                throw new Exception("فشل فتح ملف مؤقت للكتابة: {$tempPath}");
-            }
-
-            // عشان نتحقق من الـ MIME type قبل التنزيل الكامل
-            $initialResponse = Http::timeout($timeout)->head($url);
-            if ($initialResponse->failed()) {
-                throw new Exception('فشل جلب معلومات الملف من الرابط: ' . $initialResponse->status());
-            }
-            $contentTypeHeader = $initialResponse->header('Content-Type');
-            $mimeType = $this->detectMimeType($tempPath, $contentTypeHeader);
-            $this->validateAllowedMimeType($mimeType); // وظيفة جديدة للفحص
-
-            do {
-                $endByte = $startByte + $chunkSize - 1;
-                $response = Http::timeout($timeout)
-                    ->withHeaders([
-                        'Range' => "bytes={$startByte}-{$endByte}",
-                        'Accept' => '*/*'
-                    ])
-                    ->get($url);
-
-                if ($response->failed()) {
-                    // لو الخادم مردش أو مدعمش التحميل المجزأ بعد أول جزء
-                    if ($response->status() === 416 && $startByte === 0) { // لو 416 في البداية يبقى مش بيدعم الـ Range
-                         //Fallback to normal download
-                        if (is_resource($fileHandle)) {
-                            fclose($fileHandle);
-                        }
-                        return $this->simpleDownloadFromUrl($url, $options);
-                    } elseif ($response->status() === 416 && $startByte > 0) {
-                        // لو 416 بعد ما بدأنا تحميل يبقى الملف خلص أو فيه مشكلة في الـ range اللي بنطلبه
-                        break; // نوقف التحميل ونعتبره خلص
-                    } else {
-                        throw new Exception('فشل التحميل المجزأ: ' . $response->status());
-                    }
-                }
-
-                $chunkData = $response->body();
-                $bytesWritten = fwrite($fileHandle, $chunkData);
-                if ($bytesWritten === false) {
-                     throw new Exception('فشل الكتابة في الملف المؤقت أثناء التحميل المجزأ.');
-                }
-                $bytesDownloaded += $bytesWritten;
-                $startByte += $bytesWritten;
-
-                if ($bytesDownloaded > $maxSize) {
-                    throw new Exception('حجم الملف يتجاوز الحد المسموح به (' . round($maxSize / (1024 * 1024), 2) . 'MB)');
-                }
-
-                $contentRange = $response->header('Content-Range');
-                $totalSize = $contentRange ? (int) explode('/', $contentRange)[1] : null;
-
-                // لو التحميل المجزأ مدعومش، نعتمد على الـ Content-Length بتاع الـ chunk الأخير لو مفيش Content-Range
-                if (!$totalSize && $response->header('Content-Length')) {
-                    $totalSize = $bytesDownloaded; // لو محددش الـ Total Size يبقى اللي نزلناه هو ده كله
-                }
-
-            } while (!$totalSize || $bytesDownloaded < $totalSize);
-
-            if (is_resource($fileHandle)) {
-                fclose($fileHandle);
-            }
-
-            // تحديد معلومات الملف
-            // ملاحظة: الـ mimetype ممكن يكون مش دقيق لحد ما يتم تحميل الملف كله.
-            $mimeType = $this->detectMimeType($tempPath, $contentTypeHeader);
-            $extension = $this->getExtensionFromMime($mimeType, $url);
-            $originalName = pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_FILENAME) ?: $tempName;
-
-            // إعادة تسمية الملف بالامتداد الصحيح
-            $finalPath = "{$tempPath}.{$extension}";
-            rename($tempPath, $finalPath);
-
-            return new UploadedFile(
-                $finalPath,
-                "{$originalName}.{$extension}",
-                $mimeType,
-                null,
-                true
-            );
-        } catch (Exception $e) {
-            // تنظيف الملفات المؤقتة لو حصل خطأ
-            if (is_resource($fileHandle)) {
-                fclose($fileHandle);
-            }
-            if (file_exists($tempPath)) {
-                unlink($tempPath);
-            }
-            if (isset($finalPath) && file_exists($finalPath)) {
-                unlink($finalPath);
-            }
-
-            Log::error("خطأ في التحميل المجزأ من URL {$url}: " . $e->getMessage());
-            throw new Exception('خطأ في التحميل المجزأ: ' . $e->getMessage());
-        }
-    }
-
-    /**
      * بيحمل الملف من URL بشكل مباشر (مش مجزأ).
      *
      * @param string $url الـ URL بتاع الملف.
@@ -256,15 +137,44 @@ class FileUploadService
      * @return UploadedFile كائن UploadedFile للملف اللي تم تحميله.
      * @throws Exception لو حصل خطأ في التحميل المباشر أو تجاوز الحجم الأقصى.
      */
-    protected function simpleDownloadFromUrl(string $url, array $options): UploadedFile
+    protected function chunkedDownloadFromUrl(string $url, array $options): UploadedFile
     {
         try {
             $timeout = $options['timeout'] ?? config('file-upload.url_download.timeout', 30);
             $maxSize = $options['max_size'] ?? config('file-upload.url_download.max_size', 1024 * 1024 * 50); // 50MB default
+            $maxRetries = 3;
+            $baseDelay = 1; // ثانية واحدة أساسية
+            $retryCount = 0;
+            $response = null;
 
-            $response = Http::timeout($timeout)
-                ->withHeaders(['Accept' => '*/*'])
-                ->get($url);
+            // محاولة التحميل مع إعادة المحاولة في حالة 429
+            while ($retryCount <= $maxRetries) {
+                $response = Http::timeout($timeout)
+                    ->withHeaders(['Accept' => '*/*'])
+                    ->get($url);
+
+                // لو النتيجة ناجحة، نخرج من loop إعادة المحاولة
+                if ($response->successful()) {
+                    break;
+                }
+
+                // لو 429 (Too Many Requests)، نستنى ونعيد المحاولة
+                if ($response->status() === 429) {
+                    if ($retryCount < $maxRetries) {
+                        $delay = $baseDelay * pow(2, $retryCount); // exponential backoff
+                        Log::info("تم الحصول على 429 في التحميل البسيط للرابط {$url}، انتظار {$delay} ثانية قبل إعادة المحاولة (محاولة {$retryCount}/{$maxRetries})");
+                        sleep($delay);
+                        $retryCount++;
+                        continue;
+                    } else {
+                        Log::error("تجاوز عدد المحاولات المسموحة في التحميل البسيط للرابط {$url} بسبب 429");
+                        throw new Exception('تجاوز الحد المسموح من الطلبات للخادم. حاول مرة أخرى لاحقاً.');
+                    }
+                }
+
+                // لو أي خطأ تاني، نخرج من الـ loop
+                break;
+            }
 
             if ($response->failed()) {
                 throw new Exception('فشل تنزيل الملف من الرابط: ' . $response->status());
@@ -298,10 +208,133 @@ class FileUploadService
             if (isset($tempPath) && file_exists($tempPath)) {
                 unlink($tempPath);
             }
+
             Log::error("خطأ أثناء تنزيل الملف من URL {$url}: " . $e->getMessage());
             throw new Exception('خطأ أثناء تنزيل الملف: ' . $e->getMessage());
         }
     }
+
+    /**
+     * بيحمل الملف من URL بشكل مباشر (مش مجزأ).
+     *
+     * @param string $url الـ URL بتاع الملف.
+     * @param array $options خيارات التحميل (timeout, maxSize).
+     * @return UploadedFile كائن UploadedFile للملف اللي تم تحميله.
+     * @throws Exception لو حصل خطأ في التحميل المباشر أو تجاوز الحجم الأقصى.
+     */
+    protected function simpleDownloadFromUrl(string $url, array $options): UploadedFile
+    {
+        try {
+            $timeout = $options['timeout'] ?? config('file-upload.url_download.timeout', 30);
+            $maxSize = $options['max_size'] ?? config('file-upload.url_download.max_size', 1024 * 1024 * 50);
+
+            $tempName = Str::uuid();
+            $tempPath = sys_get_temp_dir() . '/' . $tempName . '.tmp';
+
+            // أولاً نعمل HEAD request لفحص الملف
+            $headResponse = Http::timeout(10)->head($url);
+
+            if ($headResponse->failed()) {
+                throw new Exception('فشل في الوصول للملف: ' . $headResponse->status());
+            }
+
+            $contentLength = $headResponse->header('Content-Length');
+            $contentType = $headResponse->header('Content-Type');
+
+            if ($contentLength && (int)$contentLength > $maxSize) {
+                throw new Exception('حجم الملف يتجاوز الحد المسموح به');
+            }
+
+            $this->validateAllowedMimeType($contentType);
+
+            // تحميل الملف مباشرة إلى ملف مؤقت
+            $response = Http::timeout($timeout)
+                ->withOptions([
+                    'sink' => $tempPath, // هذا يخلي الملف يتحفظ مباشرة بدون تحميله في الذاكرة
+                ])
+                ->get($url);
+
+            if ($response->failed()) {
+                unlink($tempPath);
+                throw new Exception('فشل تنزيل الملف: ' . $response->status());
+            }
+
+            // فحص حجم الملف المحفوظ
+            if (filesize($tempPath) > $maxSize) {
+                unlink($tempPath);
+                throw new Exception('حجم الملف يتجاوز الحد المسموح به');
+            }
+
+            $extension = $this->getExtensionFromMime($contentType, $url);
+            $originalName = pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_FILENAME) ?: 'downloaded_file';
+
+            return new UploadedFile(
+                $tempPath,
+                "{$originalName}.{$extension}",
+                $contentType,
+                null,
+                true
+            );
+        } catch (Exception $e) {
+            if (isset($tempPath) && file_exists($tempPath)) {
+                unlink($tempPath);
+            }
+            Log::error("خطأ أثناء تنزيل الملف من URL {$url}: " . $e->getMessage());
+            throw new Exception('خطأ أثناء تنزيل الملف: ' . $e->getMessage());
+        }
+    }
+    // protected function simpleDownloadFromUrl(string $url, array $options): UploadedFile
+    // {
+    //     try {
+    //         $timeout = $options['timeout'] ?? config('file-upload.url_download.timeout', 30);
+    //         $maxSize = $options['max_size'] ?? config('file-upload.url_download.max_size', 1024 * 1024 * 50); // 50MB default
+
+    //         // $response = Http::timeout($timeout)
+    //         //     ->withHeaders(['Accept' => '*/*'])
+    //         //     ->get($url);
+    //         $response = Http::timeout($timeout)
+
+    //         ->withOptions([
+    //             'sink' => $tempPath, // هذا يخلي الملف يتحفظ مباشرة بدون تحميله في الذاكرة
+    //         ])
+    //         ->get($url);
+
+    //         if ($response->failed()) {
+    //             throw new Exception('فشل تنزيل الملف من الرابط: ' . $response->status());
+    //         }
+
+    //         $contentType = $response->header('Content-Type');
+    //         $this->validateAllowedMimeType($contentType); // فحص الـ MIME type
+
+    //         // التحقق من حجم الملف
+    //         if (strlen($response->body()) > $maxSize) {
+    //             throw new Exception('حجم الملف يتجاوز الحد المسموح به (' . round($maxSize / (1024 * 1024), 2) . 'MB)');
+    //         }
+
+    //         $extension = $this->getExtensionFromMime($contentType, $url);
+    //         $originalName = pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_FILENAME);
+    //         $tempName = Str::uuid() . ($originalName ? '_' . Str::slug($originalName) : ''); // استخدام Str::slug لتنظيف الاسم
+    //         $tempPath = sys_get_temp_dir() . '/' . $tempName . '.' . $extension;
+
+    //         if (!file_put_contents($tempPath, $response->body())) {
+    //             throw new Exception('فشل حفظ الملف المؤقت.');
+    //         }
+
+    //         return new UploadedFile(
+    //             $tempPath,
+    //             "{$originalName}.{$extension}",
+    //             $contentType,
+    //             null,
+    //             true
+    //         );
+    //     } catch (Exception $e) {
+    //         if (isset($tempPath) && file_exists($tempPath)) {
+    //             unlink($tempPath);
+    //         }
+    //         Log::error("خطأ أثناء تنزيل الملف من URL {$url}: " . $e->getMessage());
+    //         throw new Exception('خطأ أثناء تنزيل الملف: ' . $e->getMessage());
+    //     }
+    // }
 
     /**
      * بيتعامل مع رفع الملفات اللي جاية من الـ Request (سواء كان chunked أو عادي).
@@ -394,7 +427,7 @@ class FileUploadService
                     }
                     $results[] = $this->saveFile($singleFile, $path, $disk, $options, $customValidationRules);
                 } else {
-                     Log::warning("ملف مباشر غير صالح: " . ($singleFile instanceof UploadedFile ? $singleFile->getClientOriginalName() : 'غير معروف'));
+                    Log::warning("ملف مباشر غير صالح: " . ($singleFile instanceof UploadedFile ? $singleFile->getClientOriginalName() : 'غير معروف'));
                     $results[] = [
                         'status' => false,
                         'error' => 'ملف غير صالح',
@@ -464,13 +497,22 @@ class FileUploadService
             'image/png'     => 'png',
             'image/gif'     => 'gif',
             'image/webp'    => 'webp',
-            'video/mp4' => 'mp4', 'video/quicktime' => 'mov', 'video/x-msvideo' => 'avi',
-            'video/x-matroska' => 'mkv', 'video/webm' => 'webm', 'application/pdf' => 'pdf',
+            'video/mp4' => 'mp4',
+            'video/quicktime' => 'mov',
+            'video/x-msvideo' => 'avi',
+            'video/x-matroska' => 'mkv',
+            'video/webm' => 'webm',
+            'application/pdf' => 'pdf',
             'application/msword' => 'doc',
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
-            'application/vnd.ms-excel' => 'xls', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
-            'application/vnd.ms-powerpoint' => 'ppt', 'application/vnd.openxmlformats-officedocument.presentationml.presentation' => 'pptx',
-            'text/plain' => 'txt', 'text/csv' => 'csv', 'text/xml' => 'xml', 'application/json' => 'json'
+            'application/vnd.ms-excel' => 'xls',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
+            'application/vnd.ms-powerpoint' => 'ppt',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation' => 'pptx',
+            'text/plain' => 'txt',
+            'text/csv' => 'csv',
+            'text/xml' => 'xml',
+            'application/json' => 'json'
         ];
 
         // Fallback to common types or URL extension
@@ -485,23 +527,30 @@ class FileUploadService
      */
     protected function validateAllowedMimeType(string $mimeType)
     {
+        // dd($mimeType);
         $config = config('file-upload.url_download.allowed_mimes');
         if (empty($config)) {
             return; // لو مفيش قائمة مسموحات، كل حاجة مسموحة.
         }
+        // dd($config);
 
         $isAllowed = false;
         $fileType = explode('/', $mimeType)[0];
         $fileSubtype = explode('/', $mimeType)[1] ?? '';
 
         if (isset($config[$fileType])) {
-            if (empty($config[$fileType]) || in_array($fileSubtype, $config[$fileType])) {
+            // dd(($config[$fileType]));
+            // dd($fileSubtype, $config[$fileType]);
+            if (!empty($config[$fileType]) && in_array($fileSubtype, $config[$fileType])) {
                 $isAllowed = true;
             }
+            // dd('dd');
         } elseif (isset($config['other']) && (empty($config['other']) || in_array($fileSubtype, $config['other']))) {
             // لو فيه "other" generic category
             $isAllowed = true;
         }
+
+        // dd($isAllowed);
 
         if (!$isAllowed) {
             throw new Exception("نوع الملف ({$mimeType}) غير مسموح بتحميله من الروابط.");
@@ -570,7 +619,6 @@ class FileUploadService
                 'mime_type' => $mime,
                 'type' => $this->getFileType($mime),
             ], $fileData);
-
         } catch (Exception $e) {
             Log::error("فشل حفظ الملف: " . $e->getMessage());
             if (Storage::disk($disk)->exists($fullPath)) {
@@ -687,7 +735,7 @@ class FileUploadService
                     );
                     // لو عايز تتحكم في شفافية العلامة المائية
                     if (isset($config['watermark']['opacity'])) {
-                         // Intervention Image بيستخدم percentage (0-100)
+                        // Intervention Image بيستخدم percentage (0-100)
                         $image->opacity($config['watermark']['opacity']);
                     }
                 } else {
@@ -946,7 +994,6 @@ class FileUploadService
                 // حذف سجل الملف من الداتابيز
                 $file->delete();
                 Log::info("تم حذف الملف بنجاح (ID: {$idOrPath}, Path: {$file->path}).");
-
             } else {
                 // لو الداتابيز مش مفعلة، بنعتمد على الـ path مباشرة
                 if (!is_string($idOrPath)) {
