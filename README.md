@@ -1,377 +1,279 @@
-# AdvancedFileUpload for Laravel
+# Advanced File Upload for Laravel
 
-**A comprehensive file upload package for Laravel**, supporting local and cloud storage, image processing, file compression, format conversion, and much more.
+[![Latest Version](https://img.shields.io/packagist/v/mohamedsamy902/advanced-file-upload.svg)](https://packagist.org/packages/mohamedsamy902/advanced-file-upload)
+[![PHP Version](https://img.shields.io/badge/php-%5E8.0-blue)](https://packagist.org/packages/mohamedsamy902/advanced-file-upload)
+[![Laravel](https://img.shields.io/badge/laravel-%3E%3D9.0-red)](https://packagist.org/packages/mohamedsamy902/advanced-file-upload)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-33%20passing-brightgreen)](#testing)
 
----
-
-## 🚀 Features
-
-- ✅ **API & HTML Uploads** — Seamless integration for both API endpoints and HTML forms.
-- ☁️ **Cloud Storage Support** — S3, Google Cloud Storage, and any Laravel-supported disk.
-- 🖼️ **Image Processing** — Resize, watermark, apply filters, convert to WebP/AVIF (via Intervention Image).
-- 🖼️ **Automatic Thumbnails** — Generate thumbnails in custom sizes.
-- 🗜️ **File Compression** — Compress PDFs, DOCX, and other docs (requires external tools).
-- 📦 **Chunked Uploads** — Handle large files with Pion Laravel Chunk Upload.
-- 📊 **Quota System** — Set storage limits per user.
-- 🔗 **CDN Support** — Serve files via your preferred CDN.
-- 🧩 **Database Integration** — Store metadata for uploaded files (optional).
-- 🧪 **Unit Testing** — PHPUnit coverage included.
+A comprehensive Laravel package for file uploads — supports local & cloud storage, image processing, chunked uploads, thumbnails, CDN, quota management, and more.
 
 ---
 
-## 📦 Requirements
+## Features
 
-- PHP >= 8.0
-- Laravel >= 9.0
-- Composer
-
----
-
-## ⚙️ Installation
-
-1. **Install the package via Composer:**
-
-   ```bash
-   composer require mohamedsamy902/advanced-file-upload:dev-main
-   ```
-
-2. **Publish the config file:**
-
-   ```bash
-   php artisan vendor:publish --tag=config
-   ```
-
-3. **(Optional)** Publish and run the migration:
-
-   ```bash
-   php artisan vendor:publish --tag=migrations
-   php artisan migrate
-   ```
-
-4. **Configure your `.env` file:**
-
-   ```env
-   FILE_UPLOAD_DISK=s3
-   FILE_UPLOAD_DB_ENABLED=true
-   FILE_UPLOAD_CDN_ENABLED=true
-   FILE_UPLOAD_CDN_URL=https://your-cdn.com
-   ```
+- **Multiple upload sources** — HTTP Request, direct `UploadedFile`, URL download, or array of files
+- **Cloud storage** — S3, Google Cloud Storage, and any Laravel-supported disk
+- **Image processing** — Resize, watermark, filters, format conversion (WebP, etc.) via Intervention Image
+- **Automatic thumbnails** — Generate multiple sizes in one call
+- **Chunked uploads** — Handle large files reliably via Pion Laravel Chunk Upload
+- **URL downloads** — Download and re-upload from remote URLs (chunked or stream)
+- **Quota system** — Per-user storage limits with database tracking
+- **CDN support** — Automatically rewrite URLs to your CDN domain
+- **Database integration** — Optionally store file metadata (name, path, disk, MIME, size, type)
+- **Security** — MIME type validation, file size limits, method-injection-safe image filters
+- **Blade UI** — Ready-to-use upload form with chunked JS & progress bar
 
 ---
 
-## 🔧 Configuration
+## Requirements
 
-Edit `config/file-upload.php` to customize:
+| Dependency | Version |
+|---|---|
+| PHP | ^8.0 |
+| Laravel | >= 9.0 |
+| intervention/image | ^2.7 |
 
-| Section            | Description                                                           |
-| ------------------ | --------------------------------------------------------------------- |
-| **Storage**        | Choose disk (local, s3, gcs), base path, and organization structure.  |
-| **Validation**     | Define file rules by type: image, video, document, etc.               |
-| **Image Handling** | Enable resizing, filters, watermarks, format conversion (e.g., WebP). |
-| **Thumbnails**     | Set custom sizes (e.g., `small`, `medium`, `large`).                  |
-| **Compression**    | Enable file compression by MIME type or extension.                    |
-| **Quota**          | Set storage limits per user ID.                                       |
-| **CDN**            | Enable CDN URLs and base path for serving uploaded assets.            |
+> **Image processing** (resize, thumbnails, watermarks) requires the `gd` or `imagick` PHP extension.
 
 ---
 
-## 💡 Usage
+## Installation
 
-### Upload via Controller
+```bash
+composer require mohamedsamy902/advanced-file-upload
+```
+
+### Publish config
+
+```bash
+php artisan vendor:publish --tag=config
+```
+
+### (Optional) Publish and run migration
+
+Required only when `database.enabled = true` in the config.
+
+```bash
+php artisan vendor:publish --tag=migrations
+php artisan migrate
+```
+
+### (Optional) Publish Blade UI, JS, and CSS
+
+```bash
+php artisan vendor:publish --tag=views
+php artisan vendor:publish --tag=public
+```
+
+---
+
+## Configuration
+
+After publishing, edit `config/file-upload.php`. Key sections:
 
 ```php
-use MohamedSamy902\AdvancedFileUpload\Facades\FileUpload;
+'storage' => [
+    'disk'           => env('FILE_UPLOAD_DISK', 'public'),
+    'path'           => env('FILE_UPLOAD_PATH', 'uploads'),
+    'default_folder' => 'default',
+    'cdn' => [
+        'enabled' => env('FILE_UPLOAD_CDN_ENABLED', false),
+        'url'     => env('FILE_UPLOAD_CDN_URL', ''),
+    ],
+],
 
-public function uploadFile(Request $request)
-{
-    $result = FileUpload::upload($request, 'profile_picture', [
+'database' => [
+    'enabled' => env('FILE_UPLOAD_DB_ENABLED', true),
+],
+
+'processing' => [
+    'image' => [
+        'enabled'    => true,
+        'resize'     => ['width' => 1200, 'height' => 1200, 'maintain_aspect_ratio' => true],
         'convert_to' => 'webp',
-    ]);
+        'quality'    => 85,
+    ],
+],
 
-    return response()->json($result);
-}
+'thumbnails' => [
+    'enabled' => true,
+    'sizes'   => [
+        'small'  => ['width' => 150, 'height' => 150, 'crop' => true],
+        'medium' => ['width' => 300, 'height' => 300, 'crop' => false],
+        'large'  => ['width' => 600, 'height' => 600, 'crop' => false],
+    ],
+],
 ```
 
-### Download Image Or Video By Url
+Add to your `.env`:
 
-```php
-public function download()
-{
-    $result = FileUpload::upload([], [
-      'url' => 'http://Example.com/vwdio.mp4',
-    ]);
-
-    return response()->json($result);
-}
-```
-
-### Delete a File
-
-```php
-public function deleteFile($idOrPath)
-{
-    $result = FileUpload::delete($idOrPath);
-
-    return response()->json($result);
-}
+```env
+FILE_UPLOAD_DISK=public
+FILE_UPLOAD_DB_ENABLED=true
+FILE_UPLOAD_CDN_ENABLED=false
+FILE_UPLOAD_CDN_URL=
 ```
 
 ---
 
-## 🧾 HTML Form Example
+## Usage
 
-```html
-<form action="/upload" method="POST" enctype="multipart/form-data">
-  @csrf
-  <input type="file" name="profile_picture" />
-  <button type="submit">Upload</button>
-</form>
-```
+### Upload from HTTP Request
 
----
-
-## 🧪 API Example
-
-```bash
-curl -X POST http://your-app.com/upload \
-  -F "profile_picture=@/path/to/image.jpg"
-```
-
-### Response
-
-```json
-{
-  "path": "uploads/2025/06/23/uuid.jpg",
-  "url": "https://your-cdn.com/uploads/2025/06/23/uuid.jpg",
-  "thumbnail_urls": {
-    "small": "https://your-cdn.com/uploads/2025/06/23/thumb_small_uuid.jpg",
-    "medium": "https://your-cdn.com/uploads/2025/06/23/thumb_medium_uuid.jpg"
-  },
-  "mime_type": "image/jpeg"
-}
-```
-
----
-
-## 🧪 Testing
-
-Run PHPUnit tests:
-
-```bash
-vendor/bin/phpunit
-```
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome!  
-Please submit pull requests or open issues via [GitHub Issues](https://github.com/your-vendor/advanced-file-upload/issues).
-
----
-
-## 📄 License
-
-This package is open-sourced software licensed under the [MIT license](LICENSE).
-
----
-
-## 📘 Usage Guide (Arabic)
-
-### طريقة الاستخدام
-
-#### 1. إنشاء الباكدج
-
-- أنشئ مجلدًا باسم `advanced-file-upload`.
-- ضع الملفات ضمن الهيكلية المناسبة.
-- استبدل `your-vendor` باسمك أو اسم شركتك في الملفات و`composer.json`.
-
-#### 2. نشر الباكدج
-
-- أنشئ مستودع GitHub.
-- اربطه مع [Packagist](https://packagist.org) لنشر الباكدج.
-- حدّث `composer.json` باسمك كمزود.
-
-#### 3. تثبيت الباكدج في مشروع Laravel
-
-```bash
-composer require your-vendor/advanced-file-upload
-```
-
-#### 4. إعداد التخزين السحابي
-
-- أضف تعريف S3 أو GCS في `config/filesystems.php`.
-- ضبّط بيانات الاعتماد في `.env`.
-
-#### 5. اختبار الباكدج
-
-```bash
-vendor/bin/phpunit
-```
-
----
-
-## 🧩 الميزات التفصيلية
-
-| الميزة          | الوصف                                                         |
-| --------------- | ------------------------------------------------------------- |
-| التخزين السحابي | يدعم S3، Google Cloud، وغيرها عبر Laravel Filesystem.         |
-| معالجة الصور    | تغيير الحجم، العلامة المائية، فلاتر، تحويل إلى WebP/AVIF.     |
-| الصور المصغرة   | إنشاء تلقائي لأحجام متعددة.                                   |
-| ضغط الملفات     | ضغط ملفات PDF و DOCX (يتطلب أدوات خارجية).                    |
-| نظام الكوتا     | تعيين حدود تخزين لكل مستخدم.                                  |
-| دعم CDN         | تقديم الملفات عبر شبكة CDN.                                   |
-| قاعدة البيانات  | تخزين بيانات الملفات اختياريًا في جدول مرتبط.                 |
-| الرفع المجزأ    | دعم رفع الملفات الكبيرة باستخدام `Pion Laravel Chunk Upload`. |
-
-## New
-
-# AdvancedFileUpload for Laravel
-
-**A comprehensive file upload package for Laravel**, supporting local and cloud storage, image processing, file compression, format conversion, chunked uploads, ready-to-use Blade UI, and more.
-
----
-
-## 🚀 Features
-
-- ✅ **API & HTML Uploads** — Seamless integration for both API endpoints and HTML forms.
-- ☁️ **Cloud Storage Support** — S3, Google Cloud Storage, and any Laravel-supported disk.
-- 🖼️ **Image Processing** — Resize, watermark, apply filters, convert to WebP/AVIF (via Intervention Image).
-- 🖼️ **Automatic Thumbnails** — Generate thumbnails in custom sizes.
-- 🗜️ **File Compression** — Compress PDFs, DOCX, and other docs (requires external tools).
-- 📦 **Chunked Uploads** — Handle large files with Pion Laravel Chunk Upload.
-- 📊 **Quota System** — Set storage limits per user.
-- 🔗 **CDN Support** — Serve files via your preferred CDN.
-- 🧩 **Database Integration** — Store metadata for uploaded files (optional).
-- 🎨 **Ready Blade UI** — Plug-and-play Blade upload form with chunked JS & CSS, easily customizable.
-- 🧪 **Unit Testing** — PHPUnit coverage included.
-
----
-
-## 📦 Requirements
-
-- PHP >= 8.0
-- Laravel >= 9.0
-- Composer
-
----
-
-## ⚙️ Installation
-
-1. **Install the package via Composer:**
-
-   ```bash
-   composer require mohamedsamy902/advanced-file-upload:dev-main
-   ```
-
-2. **Publish the config file:**
-
-   ```bash
-   php artisan vendor:publish --tag=config
-   ```
-
-3. **(Optional)** Publish and run the migration:
-
-   ```bash
-   php artisan vendor:publish --tag=migrations
-   php artisan migrate
-   ```
-
-4. **(Optional)** Publish Blade, JS, and CSS for customization:
-
-   ```bash
-   php artisan vendor:publish --tag=views
-   php artisan vendor:publish --tag=public
-   ```
-
-5. **Configure your `.env` file:**
-
-   ```env
-   FILE_UPLOAD_DISK=public
-   FILE_UPLOAD_DB_ENABLED=true
-   FILE_UPLOAD_CDN_ENABLED=false
-   FILE_UPLOAD_CDN_URL=
-   ```
-
----
-
-## 🔧 Configuration
-
-Edit `config/file-upload.php` to customize:
-
-| Section            | Description                                                           |
-| ------------------ | --------------------------------------------------------------------- |
-| **Storage**        | Choose disk (local, s3, gcs), base path, and organization structure.  |
-| **Validation**     | Define file rules by type: image, video, document, etc.               |
-| **Image Handling** | Enable resizing, filters, watermarks, format conversion (e.g., WebP). |
-| **Thumbnails**     | Set custom sizes (e.g., `small`, `medium`, `large`).                  |
-| **Compression**    | Enable file compression by MIME type or extension.                    |
-| **Quota**          | Set storage limits per user ID.                                       |
-| **CDN**            | Enable CDN URLs and base path for serving uploaded assets.            |
-
----
-
-## 💡 Usage & Examples
-
-### 1. **Upload via Controller (Single File)**
+The default field name is `file`. Pass `field_name` option to change it.
 
 ```php
 use MohamedSamy902\AdvancedFileUpload\Facades\FileUpload;
 
-public function upload(Request $request)
+public function store(Request $request)
 {
     $result = FileUpload::upload($request);
+
     return response()->json($result);
 }
 ```
 
-**HTML Form:**
+**HTML form:**
 
-```blade
+```html
 <form action="{{ route('upload') }}" method="POST" enctype="multipart/form-data">
     @csrf
     <input type="file" name="file">
-    <button type="submit">رفع</button>
+    <button type="submit">Upload</button>
 </form>
 ```
 
 ---
 
-### 2. **Upload Multiple Files**
+### Upload Multiple Files
 
 ```php
-public function upload(Request $request)
-{
-    $result = FileUpload::upload($request, ['field_name' => 'files']);
-    return response()->json($result);
-}
-```
+// HTML: <input type="file" name="files[]" multiple>
 
-**HTML:**
-
-```blade
-<form action="{{ route('upload') }}" method="POST" enctype="multipart/form-data">
-    @csrf
-    <input type="file" name="files[]" multiple>
-    <button type="submit">رفع</button>
-</form>
+$result = FileUpload::upload($request, ['field_name' => 'files']);
+// returns array of results, one per file
 ```
 
 ---
 
-### 3. **Upload from URL**
+### Upload with Options
 
 ```php
-$result = FileUpload::upload([], [
-    'url' => 'https://example.com/image.jpg',
+$result = FileUpload::upload($request, [
+    'disk'        => 's3',          // override storage disk
+    'folder_name' => 'avatars',     // sub-folder inside base path
+    'convert_to'  => 'webp',        // override image format
+    'quality'     => 90,            // override image quality
+    'validation_rules' => [
+        'file' => 'required|image|mimes:jpg,png|max:2048',
+    ],
 ]);
 ```
 
 ---
 
-### 4. **Use the Ready Blade Upload UI**
+### Upload from URL
 
-Just add in your Blade view:
+Downloads the file from a remote URL and stores it.
+
+```php
+$result = FileUpload::upload([], [
+    'url' => 'https://example.com/photo.jpg',
+]);
+
+// Multiple URLs at once:
+$results = FileUpload::upload([], [
+    'url' => [
+        'https://example.com/photo1.jpg',
+        'https://example.com/photo2.jpg',
+    ],
+]);
+```
+
+---
+
+### Upload Direct `UploadedFile`
+
+```php
+$file = $request->file('avatar');
+
+$result = FileUpload::upload($file, [
+    'folder_name' => 'avatars',
+]);
+```
+
+---
+
+### Chunked Upload (large files)
+
+Works automatically when using a Request. The JS included in the package sends the file in chunks and reports progress.
+
+```php
+// Controller handles both chunked and regular uploads identically:
+$result = FileUpload::upload($request);
+
+// While chunking in progress, returns:
+// { "done": 45, "status": true }
+
+// When complete, returns the file result array.
+```
+
+---
+
+### Delete Files
+
+```php
+// By storage path
+FileUpload::delete('uploads/default/550e8400-e29b-41d4-a716.webp');
+
+// By database ID (when database.enabled = true)
+FileUpload::delete(42);
+
+// Multiple at once
+FileUpload::delete([
+    'uploads/default/uuid1.webp',
+    'uploads/default/uuid2.webp',
+]);
+```
+
+Deleting a file also removes its associated thumbnails from storage and its record from the database (if enabled).
+
+---
+
+## Response Format
+
+Every successful upload returns:
+
+```json
+{
+    "status": true,
+    "original_name": "photo.jpg",
+    "path": "uploads/avatars/550e8400-e29b-41d4-a716.webp",
+    "url": "https://your-cdn.com/uploads/avatars/550e8400-e29b-41d4-a716.webp",
+    "thumbnail_urls": {
+        "small":  "https://your-cdn.com/uploads/avatars/thumb_small_550e8400.webp",
+        "medium": "https://your-cdn.com/uploads/avatars/thumb_medium_550e8400.webp",
+        "large":  "https://your-cdn.com/uploads/avatars/thumb_large_550e8400.webp"
+    },
+    "mime_type": "image/jpeg",
+    "type": "image"
+}
+```
+
+When `database.enabled = true`, the response also includes the database record fields (`id`, `size`, `disk`, `user_id`, `created_at`, etc.).
+
+Delete returns:
+
+```json
+{ "status": true, "message": "File deleted successfully." }
+```
+
+---
+
+## Blade UI
+
+Include the ready-to-use upload form anywhere in your views:
 
 ```blade
 @include('advanced-file-upload::upload')
@@ -383,202 +285,90 @@ Or after publishing:
 @include('vendor.advanced-file-upload.upload')
 ```
 
-- This will include the ready HTML, JS, and CSS for chunked uploads and progress bar.
-- You can customize the UI by editing the published files.
+Include the assets manually if needed:
 
----
-
-### 5. **Chunked Upload with JS (Large Files)**
-
-The included JS (`advanced-file-upload.js`) supports chunked uploads out of the box.  
-You can use it directly or customize it after publishing.
-
-**Example:**
-
-```blade
-<input type="file" id="afu-fileInput">
-<button onclick="afuUploadFile({ uploadUrl: '/upload' })">رفع</button>
-<div class="afu-progress-bar"><div class="afu-progress-bar-inner" id="afu-progress-bar-inner"></div></div>
-<div id="afu-status"></div>
+```html
 <link rel="stylesheet" href="{{ asset('vendor/advanced-file-upload/advanced-file-upload.css') }}">
 <script src="{{ asset('vendor/advanced-file-upload/advanced-file-upload.js') }}"></script>
 ```
 
 ---
 
-### 6. **Customize Validation, Processing, or Storage**
+## Database Model
 
-```php
-$result = FileUpload::upload($request, [
-    'convert_to' => 'webp',
-    'validation_rules' => [
-        'file' => 'required|image|max:2048'
-    ],
-    'folder_name' => 'avatars'
-]);
-```
-
----
-
-### 7. **Delete Files**
-
-```php
-// Delete by path
-FileUpload::delete('uploads/default/uuid.jpg');
-
-// Delete by database ID (if DB enabled)
-FileUpload::delete(5);
-
-// Delete multiple files
-FileUpload::delete(['uploads/default/uuid1.jpg', 'uploads/default/uuid2.jpg']);
-```
-
----
-
-### 8. **Access Thumbnails**
-
-```php
-$result = FileUpload::upload($request);
-$thumbUrl = $result['thumbnail_urls']['small'] ?? null;
-```
-
----
-
-### 9. **CDN Support**
-
-If you enable CDN in your config:
-
-```php
-// config/file-upload.php
-'cdn' => [
-    'enabled' => true,
-    'url' => 'https://your-cdn.com',
-],
-```
-
-All returned URLs will use your CDN domain.
-
----
-
-### 10. **Database Integration**
-
-If enabled, every upload will be saved in the `file_uploads` table.  
-You can access file metadata using the model:
+When `database.enabled = true`, every upload creates a record in the `file_uploads` table:
 
 ```php
 use MohamedSamy902\AdvancedFileUpload\Models\FileUpload;
 
-$files = FileUpload::where('user_id', auth()->id())->get();
+// All files uploaded by the authenticated user
+$files = FileUpload::where('user_id', auth()->id())->latest()->get();
+
+// Find by ID
+$file = FileUpload::findOrFail(42);
 ```
+
+Table columns: `id`, `original_name`, `name`, `path`, `disk`, `mime_type`, `type`, `size`, `user_id`, `created_at`, `updated_at`.
 
 ---
 
-### 11. **Quota System**
-
-Set per-user quota in config:
-
-```php
-// config/file-upload.php
-'quota' => [
-    'enabled' => true,
-    'max_size_per_user' => 1073741824, // 1GB
-],
-```
-
-If a user exceeds their quota, an exception will be thrown.
-
----
-
-### 12. **Customize Blade, JS, and CSS**
-
-After publishing:
+## Testing
 
 ```bash
-php artisan vendor:publish --tag=views
-php artisan vendor:publish --tag=public
+php8.4 vendor/bin/phpunit --testdox
 ```
 
-- Edit `resources/views/vendor/advanced-file-upload/upload.blade.php`
-- Edit `public/vendor/advanced-file-upload/advanced-file-upload.css`
-- Edit `public/vendor/advanced-file-upload/advanced-file-upload.js`
+```
+Tests: 33   Assertions: 61   Failures: 0   Errors: 0
+```
 
 ---
 
-## 🧪 Testing
+## Cloud Storage Setup
 
-Run PHPUnit tests:
+### Amazon S3
 
 ```bash
-vendor/bin/phpunit
+composer require league/flysystem-aws-s3-v3
+```
+
+```env
+FILE_UPLOAD_DISK=s3
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=us-east-1
+AWS_BUCKET=your-bucket
+```
+
+### Google Cloud Storage
+
+```bash
+composer require spatie/laravel-google-cloud-storage
+```
+
+```env
+FILE_UPLOAD_DISK=gcs
+GOOGLE_CLOUD_PROJECT_ID=...
+GOOGLE_CLOUD_KEY_FILE=storage/app/service-account.json
+GOOGLE_CLOUD_STORAGE_BUCKET=your-bucket
 ```
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome!  
-Please submit pull requests or open issues via [GitHub Issues](https://github.com/your-vendor/advanced-file-upload/issues).
+Pull requests are welcome. For major changes, please open an issue first.
+
+```
+1. Fork the repository
+2. Create your branch: git checkout -b feature/my-feature
+3. Commit your changes: git commit -m 'Add my feature'
+4. Push: git push origin feature/my-feature
+5. Open a Pull Request
+```
 
 ---
 
-## 📄 License
+## License
 
-This package is open-sourced software licensed under the [MIT license](LICENSE).
-
----
-
-## 📘 Usage Guide (Arabic)
-
-### أمثلة الاستخدام
-
-#### رفع ملف من فورم HTML
-
-```blade
-<form action="{{ route('upload') }}" method="POST" enctype="multipart/form-data">
-    @csrf
-    <input type="file" name="file">
-    <button type="submit">رفع</button>
-</form>
-```
-
-#### رفع ملف من رابط
-
-```php
-$result = FileUpload::upload([], ['url' => 'https://example.com/image.jpg']);
-```
-
-#### استخدام واجهة Blade الجاهزة
-
-```blade
-@include('advanced-file-upload::upload')
-```
-
-#### حذف ملف
-
-```php
-FileUpload::delete('uploads/default/uuid.jpg');
-```
-
-#### تخصيص الاستايل
-
-بعد النشر:
-
-- عدل CSS/JS في `public/vendor/advanced-file-upload/`
-- عدل Blade في `resources/views/vendor/advanced-file-upload/`
-
----
-
-## 🧩 الميزات التفصيلية
-
-| الميزة          | الوصف                                                         |
-| --------------- | ------------------------------------------------------------- |
-| التخزين السحابي | يدعم S3، Google Cloud، وغيرها عبر Laravel Filesystem.         |
-| معالجة الصور    | تغيير الحجم، العلامة المائية، فلاتر، تحويل إلى WebP/AVIF.     |
-| الصور المصغرة   | إنشاء تلقائي لأحجام متعددة.                                   |
-| ضغط الملفات     | ضغط ملفات PDF و DOCX (يتطلب أدوات خارجية).                    |
-| نظام الكوتا     | تعيين حدود تخزين لكل مستخدم.                                  |
-| دعم CDN         | تقديم الملفات عبر شبكة CDN.                                   |
-| قاعدة البيانات  | تخزين بيانات الملفات اختياريًا في جدول مرتبط.                 |
-| الرفع المجزأ    | دعم رفع الملفات الكبيرة باستخدام `Pion Laravel Chunk Upload`. |
-| Blade UI        | واجهة Blade جاهزة وقابلة للتخصيص.                             |
-| تخصيص كامل      | CSS/JS/Blade قابل للنشر والتعديل بسهولة.                      |
+MIT — see [LICENSE](LICENSE) for details.

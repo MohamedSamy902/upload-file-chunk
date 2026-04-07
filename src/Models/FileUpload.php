@@ -9,9 +9,12 @@ class FileUpload extends Model
     protected $table = 'file_uploads';
 
     protected $fillable = [
+        'original_name',
         'name',
         'path',
+        'disk',
         'mime_type',
+        'type',
         'size',
         'user_id',
     ];

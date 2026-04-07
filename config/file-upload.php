@@ -31,10 +31,16 @@ return [
         'max_size' => 524288000, // 500MB
         'chunk_size' => 5242880, // 5MB
         'allowed_mimes' => [
-            'image' => ['jpeg', 'png', 'jpg', 'gif', 'webp', 'svg'],
-            'video' => ['mp4', 'mov', 'avi', 'mkv', 'webm'],
-            'audio' => ['mp3', 'wav', 'ogg'],
-            'document' => ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt'],
+            'image'       => ['jpeg', 'png', 'jpg', 'gif', 'webp', 'svg'],
+            'video'       => ['mp4', 'mov', 'avi', 'mkv', 'webm'],
+            'audio'       => ['mp3', 'wav', 'ogg'],
+            'application' => ['pdf', 'msword', 'zip', 'x-zip-compressed',
+                              'vnd.openxmlformats-officedocument.wordprocessingml.document',
+                              'vnd.ms-excel',
+                              'vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                              'vnd.ms-powerpoint',
+                              'vnd.openxmlformats-officedocument.presentationml.presentation'],
+            'text'        => ['plain', 'csv', 'xml'],
         ],
     ],
 
