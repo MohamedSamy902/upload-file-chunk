@@ -1,23 +1,30 @@
 <?php
 
+declare(strict_types=1);
+
 namespace MohamedSamy902\AdvancedFileUpload\Tests\Feature;
 
 use MohamedSamy902\AdvancedFileUpload\Services\FileUploadService;
 use MohamedSamy902\AdvancedFileUpload\Tests\TestCase;
+use MohamedSamy902\AdvancedFileUpload\ValueObjects\UploadResult;
 use Illuminate\Http\UploadedFile;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
 use Exception;
 
 class FileUploadServiceTest extends TestCase
 {
     protected FileUploadService $service;
+    protected FileUploadService $urlService;
 
     protected function setUp(): void
     {
         parent::setUp();
-        $this->service = new FileUploadService();
         Storage::fake('public');
+        // Default service uses the real SSRF validator (for non-URL tests)
+        $this->service    = $this->app->make(FileUploadService::class);
+        // URL service bypasses DNS resolution — suitable for faked HTTP calls
+        $this->urlService = $this->makeService($this->noopSsrf());
     }
 
     // =========================================================================
@@ -26,16 +33,29 @@ class FileUploadServiceTest extends TestCase
 
     public function test_uploads_single_image_file(): void
     {
-        $file = UploadedFile::fake()->create('photo.jpg', 100, 'image/jpeg');
+        $file   = UploadedFile::fake()->create('photo.jpg', 100, 'image/jpeg');
         $result = $this->service->upload($file);
 
+        $this->assertInstanceOf(UploadResult::class, $result);
+        $this->assertTrue($result->status);
+        $this->assertNotEmpty($result->path);
+        $this->assertNotEmpty($result->url);
+        $this->assertEquals('photo.jpg', $result->originalName);
+        $this->assertEquals('image', $result->type);
+        Storage::disk('public')->assertExists($result->path);
+    }
+
+    public function test_upload_result_implements_array_access_for_backward_compat(): void
+    {
+        $file   = UploadedFile::fake()->create('photo.jpg', 100, 'image/jpeg');
+        $result = $this->service->upload($file);
+
+        // ArrayAccess backward-compatibility — $result['path'] must still work
+        $this->assertInstanceOf(UploadResult::class, $result);
+        $this->assertNotEmpty($result['path']);
+        $this->assertNotEmpty($result['url']);
         $this->assertTrue($result['status']);
-        $this->assertArrayHasKey('path', $result);
-        $this->assertArrayHasKey('url', $result);
-        $this->assertArrayHasKey('original_name', $result);
         $this->assertEquals('photo.jpg', $result['original_name']);
-        $this->assertEquals('image', $result['type']);
-        Storage::disk('public')->assertExists($result['path']);
     }
 
     public function test_uploads_multiple_files_as_array(): void
@@ -50,24 +70,23 @@ class FileUploadServiceTest extends TestCase
 
         $this->assertCount(3, $results);
         foreach ($results as $result) {
-            $this->assertTrue($result['status']);
-            Storage::disk('public')->assertExists($result['path']);
+            $this->assertInstanceOf(UploadResult::class, $result);
+            $this->assertTrue($result->status);
+            Storage::disk('public')->assertExists($result->path);
         }
     }
 
     public function test_upload_uses_uuid_filename_not_original(): void
     {
-        $file = UploadedFile::fake()->create('my-secret-name.jpg', 50, 'image/jpeg');
+        $file   = UploadedFile::fake()->create('my-secret-name.jpg', 50, 'image/jpeg');
         $result = $this->service->upload($file);
 
-        // stored filename must be a UUID, not the original name
-        $storedName = basename($result['path']);
+        $storedName = basename($result->path);
         $this->assertMatchesRegularExpression(
             '/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[a-z]+$/',
             $storedName
         );
-        // but original name must be preserved in result
-        $this->assertEquals('my-secret-name.jpg', $result['original_name']);
+        $this->assertEquals('my-secret-name.jpg', $result->originalName);
     }
 
     // =========================================================================
@@ -79,30 +98,42 @@ class FileUploadServiceTest extends TestCase
         Storage::fake('s3');
         $file = UploadedFile::fake()->create('doc.pdf', 100, 'application/pdf');
 
-        $result = $this->service->upload($file, ['disk' => 's3']);
+        // Storage::fake('s3') creates a mock disk so no real driver is needed.
+        // We still need to bypass the cloud dependency guard since the real adapter
+        // class is not installed in the dev environment.
+        $service = new class(
+            $this->app->make(\MohamedSamy902\AdvancedFileUpload\Services\UrlDownloader::class),
+            $this->app->make(\MohamedSamy902\AdvancedFileUpload\Services\FileValidator::class),
+            $this->app->make(\MohamedSamy902\AdvancedFileUpload\Services\StorageManager::class),
+            $this->app->make(\MohamedSamy902\AdvancedFileUpload\Contracts\QuotaManagerContract::class),
+        ) extends FileUploadService {
+            protected function assertCloudDependenciesInstalled(string $disk): void {}
+        };
 
-        Storage::disk('s3')->assertExists($result['path']);
-        Storage::disk('public')->assertMissing($result['path']);
+        $result = $service->upload($file, ['disk' => 's3']);
+
+        Storage::disk('s3')->assertExists($result->path);
+        Storage::disk('public')->assertMissing($result->path);
     }
+
 
     public function test_upload_to_custom_folder(): void
     {
-        $file = UploadedFile::fake()->create('report.pdf', 100, 'application/pdf');
+        $file   = UploadedFile::fake()->create('report.pdf', 100, 'application/pdf');
         $result = $this->service->upload($file, ['folder_name' => 'reports']);
 
-        $this->assertStringContainsString('reports/', $result['path']);
-        Storage::disk('public')->assertExists($result['path']);
+        $this->assertStringContainsString('reports/', $result->path);
+        Storage::disk('public')->assertExists($result->path);
     }
 
     public function test_upload_with_no_folder_uses_base_path_only(): void
     {
         $this->app['config']->set('file-upload.storage.default_folder', null);
-        $file = UploadedFile::fake()->create('flat.pdf', 100, 'application/pdf');
-
+        $file   = UploadedFile::fake()->create('flat.pdf', 100, 'application/pdf');
         $result = $this->service->upload($file, ['folder_name' => null]);
 
-        // path should not have nested folder
-        $this->assertEquals(1, substr_count(trim($result['path'], '/'), '/'));
+        // Path should be uploads/<uuid>.pdf — only 1 slash
+        $this->assertEquals(1, substr_count(trim($result->path, '/'), '/'));
     }
 
     // =========================================================================
@@ -111,44 +142,44 @@ class FileUploadServiceTest extends TestCase
 
     public function test_detects_pdf_type_correctly(): void
     {
-        $file = UploadedFile::fake()->create('contract.pdf', 100, 'application/pdf');
+        $file   = UploadedFile::fake()->create('contract.pdf', 100, 'application/pdf');
         $result = $this->service->upload($file);
 
-        $this->assertEquals('pdf', $result['type']);
+        $this->assertEquals('pdf', $result->type);
     }
 
     public function test_detects_video_type_correctly(): void
     {
-        $file = UploadedFile::fake()->create('clip.mp4', 500, 'video/mp4');
-
+        $file   = UploadedFile::fake()->create('clip.mp4', 500, 'video/mp4');
         $result = $this->service->upload($file, [
             'validation_rules' => ['file' => 'required|file|mimes:mp4,mov,avi'],
         ]);
 
-        $this->assertEquals('video', $result['type']);
+        $this->assertEquals('video', $result->type);
     }
 
     public function test_detects_audio_type_correctly(): void
     {
-        $file = UploadedFile::fake()->create('song.mp3', 200, 'audio/mpeg');
-
+        $file   = UploadedFile::fake()->create('song.mp3', 200, 'audio/mpeg');
         $result = $this->service->upload($file, [
             'validation_rules' => ['file' => 'required|file|mimes:mp3,wav,ogg'],
         ]);
 
-        $this->assertEquals('audio', $result['type']);
+        $this->assertEquals('audio', $result->type);
     }
 
     public function test_detects_document_type_correctly(): void
     {
-        $file = UploadedFile::fake()->create('word.docx', 100,
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-
+        $file   = UploadedFile::fake()->create(
+            'word.docx',
+            100,
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+        );
         $result = $this->service->upload($file, [
             'validation_rules' => ['file' => 'required|file|mimes:doc,docx,pdf'],
         ]);
 
-        $this->assertEquals('document', $result['type']);
+        $this->assertEquals('document', $result->type);
     }
 
     // =========================================================================
@@ -167,13 +198,12 @@ class FileUploadServiceTest extends TestCase
 
     public function test_accepts_file_with_custom_validation_rules(): void
     {
-        $file = UploadedFile::fake()->create('data.csv', 50, 'text/csv');
-
+        $file   = UploadedFile::fake()->create('data.csv', 50, 'text/csv');
         $result = $this->service->upload($file, [
             'validation_rules' => ['file' => 'required|file|mimes:csv,txt'],
         ]);
 
-        $this->assertTrue($result['status']);
+        $this->assertTrue($result->status);
     }
 
     public function test_rejects_disallowed_mime_from_custom_rules(): void
@@ -190,9 +220,6 @@ class FileUploadServiceTest extends TestCase
     // Upload — URL Download
     // =========================================================================
 
-    // URL tests use a loose validation rule because Http::fake returns raw bytes
-    // that fileinfo cannot detect as a specific MIME type (no GD extension available).
-    // In production, real downloaded files will have correct MIME types.
     private function urlTestOptions(array $extra = []): array
     {
         return array_merge([
@@ -208,11 +235,12 @@ class FileUploadServiceTest extends TestCase
             ),
         ]);
 
-        $result = $this->service->upload([], $this->urlTestOptions(['url' => 'https://cdn.example.com/photo.jpg']));
+        // uses urlService
+        $result  = $this->urlService->upload([], $this->urlTestOptions(['url' => 'https://cdn.example.com/photo.jpg']));
 
-        $this->assertTrue($result['status']);
-        $this->assertArrayHasKey('path', $result);
-        Storage::disk('public')->assertExists($result['path']);
+        $this->assertInstanceOf(UploadResult::class, $result);
+        $this->assertTrue($result->status);
+        Storage::disk('public')->assertExists($result->path);
     }
 
     public function test_url_upload_preserves_original_filename_from_url(): void
@@ -223,9 +251,10 @@ class FileUploadServiceTest extends TestCase
             ),
         ]);
 
-        $result = $this->service->upload([], $this->urlTestOptions(['url' => 'https://cdn.example.com/profile-picture.jpg']));
+        // uses urlService
+        $result  = $this->urlService->upload([], $this->urlTestOptions(['url' => 'https://cdn.example.com/profile-picture.jpg']));
 
-        $this->assertEquals('profile-picture.jpg', $result['original_name']);
+        $this->assertEquals('profile-picture.jpg', $result->originalName);
     }
 
     public function test_url_upload_uses_fallback_filename_when_url_has_none(): void
@@ -236,9 +265,10 @@ class FileUploadServiceTest extends TestCase
             ),
         ]);
 
-        $result = $this->service->upload([], $this->urlTestOptions(['url' => 'https://cdn.example.com/']));
+        // uses urlService
+        $result  = $this->urlService->upload([], $this->urlTestOptions(['url' => 'https://cdn.example.com/']));
 
-        $this->assertStringEndsWith('.png', $result['original_name']);
+        $this->assertStringEndsWith('.png', $result->originalName);
     }
 
     public function test_url_upload_fails_on_404(): void
@@ -249,7 +279,8 @@ class FileUploadServiceTest extends TestCase
             'https://cdn.example.com/missing.jpg' => Http::response('', 404),
         ]);
 
-        $this->service->upload([], ['url' => 'https://cdn.example.com/missing.jpg']);
+        // uses urlService
+        $this->urlService->upload([], ['url' => 'https://cdn.example.com/missing.jpg']);
     }
 
     public function test_url_upload_retries_on_429(): void
@@ -261,16 +292,17 @@ class FileUploadServiceTest extends TestCase
                 ->push(str_repeat('a', 512), 200, ['Content-Type' => 'image/jpeg']),
         ]);
 
-        $result = $this->service->upload([], $this->urlTestOptions(['url' => 'https://cdn.example.com/rate-limited.jpg']));
+        // uses urlService
+        $result  = $this->urlService->upload([], $this->urlTestOptions(['url' => 'https://cdn.example.com/rate-limited.jpg']));
 
-        $this->assertTrue($result['status']);
+        $this->assertTrue($result->status);
     }
 
     public function test_url_upload_fails_when_exceeds_max_size(): void
     {
         $this->expectException(Exception::class);
 
-        $this->app['config']->set('file-upload.url_download.max_size', 100);
+        $this->app['config']->set('file-upload.url_upload.max_size_bytes', 100);
 
         Http::fake([
             'https://cdn.example.com/huge.jpg' => Http::response(
@@ -278,7 +310,8 @@ class FileUploadServiceTest extends TestCase
             ),
         ]);
 
-        $this->service->upload([], ['url' => 'https://cdn.example.com/huge.jpg']);
+        // uses urlService
+        $this->urlService->upload([], ['url' => 'https://cdn.example.com/huge.jpg']);
     }
 
     public function test_url_upload_blocks_disallowed_mime_type(): void
@@ -291,21 +324,22 @@ class FileUploadServiceTest extends TestCase
             ),
         ]);
 
-        $this->service->upload([], ['url' => 'https://cdn.example.com/script.php']);
+        // uses urlService
+        $this->urlService->upload([], ['url' => 'https://cdn.example.com/script.php']);
     }
 
     public function test_url_upload_handles_content_type_with_charset(): void
     {
-        // Content-Type header with charset params must be stripped before MIME validation
         Http::fake([
             'https://cdn.example.com/image.jpg' => Http::response(
                 str_repeat('b', 512), 200, ['Content-Type' => 'image/jpeg; charset=binary']
             ),
         ]);
 
-        $result = $this->service->upload([], $this->urlTestOptions(['url' => 'https://cdn.example.com/image.jpg']));
+        // uses urlService
+        $result  = $this->urlService->upload([], $this->urlTestOptions(['url' => 'https://cdn.example.com/image.jpg']));
 
-        $this->assertTrue($result['status']);
+        $this->assertTrue($result->status);
     }
 
     public function test_multiple_url_uploads(): void
@@ -315,18 +349,18 @@ class FileUploadServiceTest extends TestCase
             'https://cdn.example.com/b.jpg' => Http::response(str_repeat('b', 256), 200, ['Content-Type' => 'image/jpeg']),
         ]);
 
-        $opts = $this->urlTestOptions([
+        // uses urlService
+        $results = $this->urlService->upload([], $this->urlTestOptions([
             'url' => [
                 'https://cdn.example.com/a.jpg',
                 'https://cdn.example.com/b.jpg',
             ],
-        ]);
-
-        $results = $this->service->upload([], $opts);
+        ]));
 
         $this->assertCount(2, $results);
-        $this->assertTrue($results[0]['status']);
-        $this->assertTrue($results[1]['status']);
+        $this->assertInstanceOf(UploadResult::class, $results[0]);
+        $this->assertTrue($results[0]->status);
+        $this->assertTrue($results[1]->status);
     }
 
     public function test_multiple_url_uploads_continue_on_partial_failure(): void
@@ -336,17 +370,18 @@ class FileUploadServiceTest extends TestCase
             'https://cdn.example.com/fail.jpg' => Http::response('', 500),
         ]);
 
-        $opts = $this->urlTestOptions([
+        // uses urlService
+        $results = $this->urlService->upload([], $this->urlTestOptions([
             'url' => [
                 'https://cdn.example.com/ok.jpg',
                 'https://cdn.example.com/fail.jpg',
             ],
-        ]);
-
-        $results = $this->service->upload([], $opts);
+        ]));
 
         $this->assertCount(2, $results);
-        $this->assertTrue($results[0]['status']);
+        $this->assertInstanceOf(UploadResult::class, $results[0]);
+        $this->assertTrue($results[0]->status);
+        // Failed uploads return plain arrays (not UploadResult)
         $this->assertFalse($results[1]['status']);
         $this->assertArrayHasKey('error', $results[1]);
     }
@@ -366,9 +401,10 @@ class FileUploadServiceTest extends TestCase
             ]),
         ]);
 
-        $result = $this->service->upload([], $this->urlTestOptions(['url' => 'https://cdn.example.com/photo.jpg']));
+        // uses urlService
+        $result  = $this->urlService->upload([], $this->urlTestOptions(['url' => 'https://cdn.example.com/photo.jpg']));
 
-        $this->assertTrue($result['status']);
+        $this->assertTrue($result->status);
     }
 
     // =========================================================================
@@ -379,22 +415,21 @@ class FileUploadServiceTest extends TestCase
     {
         $this->app['config']->set('file-upload.database.enabled', false);
 
-        $file = UploadedFile::fake()->create('todelete.pdf', 50, 'application/pdf');
+        $file   = UploadedFile::fake()->create('todelete.pdf', 50, 'application/pdf');
         $result = $this->service->upload($file);
 
-        $this->service->delete($result['path']);
+        $this->service->delete($result->path);
 
-        Storage::disk('public')->assertMissing($result['path']);
+        Storage::disk('public')->assertMissing($result->path);
     }
 
     public function test_delete_returns_success_status(): void
     {
         $this->app['config']->set('file-upload.database.enabled', false);
 
-        $file = UploadedFile::fake()->create('todelete2.pdf', 50, 'application/pdf');
-        $result = $this->service->upload($file);
-
-        $deleteResult = $this->service->delete($result['path']);
+        $file         = UploadedFile::fake()->create('todelete2.pdf', 50, 'application/pdf');
+        $result       = $this->service->upload($file);
+        $deleteResult = $this->service->delete($result->path);
 
         $this->assertTrue($deleteResult['status']);
         $this->assertArrayHasKey('message', $deleteResult);
@@ -406,8 +441,8 @@ class FileUploadServiceTest extends TestCase
 
         $paths = [];
         foreach (['a.pdf', 'b.pdf', 'c.pdf'] as $name) {
-            $file = UploadedFile::fake()->create($name, 50, 'application/pdf');
-            $paths[] = $this->service->upload($file)['path'];
+            $file    = UploadedFile::fake()->create($name, 50, 'application/pdf');
+            $paths[] = $this->service->upload($file)->path;
         }
 
         $results = $this->service->delete($paths);
@@ -443,20 +478,55 @@ class FileUploadServiceTest extends TestCase
         $this->app['config']->set('file-upload.storage.cdn.enabled', true);
         $this->app['config']->set('file-upload.storage.cdn.url', 'https://cdn.myapp.com');
 
-        $file = UploadedFile::fake()->create('asset.pdf', 50, 'application/pdf');
+        $file   = UploadedFile::fake()->create('asset.pdf', 50, 'application/pdf');
         $result = $this->service->upload($file);
 
-        $this->assertStringStartsWith('https://cdn.myapp.com/', $result['url']);
+        $this->assertStringStartsWith('https://cdn.myapp.com/', $result->url);
     }
 
     public function test_returns_storage_url_when_cdn_disabled(): void
     {
         $this->app['config']->set('file-upload.storage.cdn.enabled', false);
 
-        $file = UploadedFile::fake()->create('asset2.pdf', 50, 'application/pdf');
+        $file   = UploadedFile::fake()->create('asset2.pdf', 50, 'application/pdf');
         $result = $this->service->upload($file);
 
-        $this->assertStringNotContainsString('cdn.myapp.com', $result['url']);
+        $this->assertStringNotContainsString('cdn.myapp.com', $result->url);
+    }
+
+    // =========================================================================
+    // UploadResult — Value Object
+    // =========================================================================
+
+    public function test_upload_result_to_array_has_correct_shape(): void
+    {
+        $file   = UploadedFile::fake()->create('doc.pdf', 100, 'application/pdf');
+        $result = $this->service->upload($file);
+
+        $arr = $result->toArray();
+
+        $this->assertArrayHasKey('status', $arr);
+        $this->assertArrayHasKey('original_name', $arr);
+        $this->assertArrayHasKey('path', $arr);
+        $this->assertArrayHasKey('url', $arr);
+        $this->assertArrayHasKey('mime_type', $arr);
+        $this->assertArrayHasKey('type', $arr);
+        $this->assertArrayHasKey('size', $arr);
+        $this->assertArrayHasKey('thumbnail_urls', $arr);
+        $this->assertArrayHasKey('database_id', $arr);
+    }
+
+    public function test_upload_result_to_json_is_valid(): void
+    {
+        $file   = UploadedFile::fake()->create('doc.pdf', 100, 'application/pdf');
+        $result = $this->service->upload($file);
+
+        $json = $result->toJson();
+        $this->assertJson($json);
+
+        $decoded = json_decode($json, true);
+        $this->assertArrayHasKey('path', $decoded);
+        $this->assertArrayHasKey('status', $decoded);
     }
 
     // =========================================================================
@@ -479,7 +549,8 @@ class FileUploadServiceTest extends TestCase
 
         $results = $this->service->upload($files);
 
-        $this->assertTrue($results[0]['status']);
+        $this->assertInstanceOf(UploadResult::class, $results[0]);
+        $this->assertTrue($results[0]->status);
         $this->assertFalse($results[1]['status']);
         $this->assertArrayHasKey('error', $results[1]);
     }

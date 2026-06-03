@@ -1,374 +1,542 @@
-# Advanced File Upload for Laravel
+# Advanced File Upload
 
-[![Latest Version](https://img.shields.io/packagist/v/mohamedsamy902/advanced-file-upload.svg)](https://packagist.org/packages/mohamedsamy902/advanced-file-upload)
-[![PHP Version](https://img.shields.io/badge/php-%5E8.0-blue)](https://packagist.org/packages/mohamedsamy902/advanced-file-upload)
-[![Laravel](https://img.shields.io/badge/laravel-%3E%3D9.0-red)](https://packagist.org/packages/mohamedsamy902/advanced-file-upload)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-33%20passing-brightgreen)](#testing)
+A production-ready Laravel package for chunked uploads, image processing, URL downloads, multi-cloud storage, and resumable file transfers.
 
-A comprehensive Laravel package for file uploads — supports local & cloud storage, image processing, chunked uploads, thumbnails, CDN, quota management, and more.
+[![PHP](https://img.shields.io/badge/PHP-8.1%2B-blue.svg)](https://php.net)
+[![Laravel](https://img.shields.io/badge/Laravel-10%20|%2011%20|%2012%20|%2013-red.svg)](https://laravel.com)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Tests](https://github.com/MohamedSamy902/uplade-file-chunk/actions/workflows/tests.yml/badge.svg)](https://github.com/MohamedSamy902/uplade-file-chunk/actions)
 
----
+## Contents
 
-## Features
-
-- **Multiple upload sources** — HTTP Request, direct `UploadedFile`, URL download, or array of files
-- **Cloud storage** — S3, Google Cloud Storage, and any Laravel-supported disk
-- **Image processing** — Resize, watermark, filters, format conversion (WebP, etc.) via Intervention Image
-- **Automatic thumbnails** — Generate multiple sizes in one call
-- **Chunked uploads** — Handle large files reliably via Pion Laravel Chunk Upload
-- **URL downloads** — Download and re-upload from remote URLs (chunked or stream)
-- **Quota system** — Per-user storage limits with database tracking
-- **CDN support** — Automatically rewrite URLs to your CDN domain
-- **Database integration** — Optionally store file metadata (name, path, disk, MIME, size, type)
-- **Security** — MIME type validation, file size limits, method-injection-safe image filters
-- **Blade UI** — Ready-to-use upload form with chunked JS & progress bar
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
+  - [Single File Upload](#single-file-upload)
+  - [Batch Upload](#batch-upload)
+  - [URL Download and Upload](#url-download-and-upload)
+  - [Resumable Chunked Upload](#resumable-chunked-upload)
+  - [Image Processing](#image-processing)
+  - [CDN URL Rewriting](#cdn-url-rewriting)
+  - [Deleting Files](#deleting-files)
+- [Security](#security)
+- [Events](#events)
+- [Testing](#testing)
+- [Changelog](#changelog)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
 ## Requirements
 
-| Dependency | Version |
+| Requirement | Version |
 |---|---|
-| PHP | ^8.0 |
-| Laravel | >= 9.0 |
-| intervention/image | ^2.7 |
-
-> **Image processing** (resize, thumbnails, watermarks) requires the `gd` or `imagick` PHP extension.
+| PHP | ^8.1 |
+| Laravel | >=10.0 |
+| Intervention Image | ^3.0 |
+| GD or Imagick | Required for image processing |
 
 ---
 
 ## Installation
 
+Install the package via Composer:
+
 ```bash
 composer require mohamedsamy902/advanced-file-upload
 ```
 
-### Publish config
+Publish the configuration file:
 
 ```bash
-php artisan vendor:publish --tag=config
+php artisan vendor:publish --provider="MohamedSamy902\AdvancedFileUpload\AdvancedFileUploadServiceProvider" --tag=config
 ```
 
-### (Optional) Publish and run migration
-
-Required only when `database.enabled = true` in the config.
+Publish and run the database migrations (required for file tracking or resumable uploads):
 
 ```bash
-php artisan vendor:publish --tag=migrations
+php artisan vendor:publish --provider="MohamedSamy902\AdvancedFileUpload\AdvancedFileUploadServiceProvider" --tag=migrations
 php artisan migrate
 ```
 
-### (Optional) Publish Blade UI, JS, and CSS
+For cloud storage, install the appropriate adapter:
 
 ```bash
-php artisan vendor:publish --tag=views
-php artisan vendor:publish --tag=public
+# Amazon S3
+composer require league/flysystem-aws-s3-v3
+
+# Google Cloud Storage
+composer require spatie/laravel-google-cloud-storage
 ```
 
 ---
 
 ## Configuration
 
-After publishing, edit `config/file-upload.php`. Key sections:
+After publishing, the configuration file is located at `config/file-upload.php`.
+
+The key sections are:
 
 ```php
-'storage' => [
-    'disk'           => env('FILE_UPLOAD_DISK', 'public'),
-    'path'           => env('FILE_UPLOAD_PATH', 'uploads'),
-    'default_folder' => 'default',
-    'cdn' => [
-        'enabled' => env('FILE_UPLOAD_CDN_ENABLED', false),
-        'url'     => env('FILE_UPLOAD_CDN_URL', ''),
+return [
+    'storage' => [
+        'disk'           => env('FILE_UPLOAD_DISK', 'public'),
+        'path'           => env('FILE_UPLOAD_PATH', 'uploads'),
+        'default_folder' => null,
+        'cdn' => [
+            'enabled' => env('FILE_UPLOAD_CDN_ENABLED', false),
+            'url'     => env('FILE_UPLOAD_CDN_URL', ''),
+        ],
     ],
-],
 
-'database' => [
-    'enabled' => env('FILE_UPLOAD_DB_ENABLED', true),
-],
-
-'processing' => [
-    'image' => [
-        'enabled'    => true,
-        'resize'     => ['width' => 1200, 'height' => 1200, 'maintain_aspect_ratio' => true],
-        'convert_to' => 'webp',
-        'quality'    => 85,
+    'url_upload' => [
+        'allowed_domains' => [],        // empty = allow all public domains
+        'timeout_seconds' => 10,
+        'max_size_bytes'  => 52428800,  // 50 MB
     ],
-],
 
-'thumbnails' => [
-    'enabled' => true,
-    'sizes'   => [
-        'small'  => ['width' => 150, 'height' => 150, 'crop' => true],
-        'medium' => ['width' => 300, 'height' => 300, 'crop' => false],
-        'large'  => ['width' => 600, 'height' => 600, 'crop' => false],
+    'image_driver' => env('FILE_UPLOAD_IMAGE_DRIVER', 'gd'),  // 'gd' or 'imagick'
+
+    'processing' => [
+        'image' => [
+            'enabled'    => false,
+            'convert_to' => null,       // 'webp', 'jpg', 'png'
+            'quality'    => 85,
+            'max_width'  => 1920,
+            'max_height' => null,
+            'upsize'     => false,
+        ],
     ],
-],
-```
 
-Add to your `.env`:
+    'thumbnails' => [
+        'enabled' => false,
+        'sizes'   => [
+            'sm' => ['width' => 150, 'height' => 150, 'crop' => true],
+            'md' => ['width' => 400, 'height' => 400, 'crop' => false],
+        ],
+    ],
 
-```env
-FILE_UPLOAD_DISK=public
-FILE_UPLOAD_DB_ENABLED=true
-FILE_UPLOAD_CDN_ENABLED=false
-FILE_UPLOAD_CDN_URL=
+    'quota' => [
+        'enabled'   => false,
+        'per_user'  => 1073741824, // 1 GB
+    ],
+
+    'chunked' => [
+        'session_ttl_hours' => 24,
+    ],
+
+    'database' => [
+        'enabled' => false,
+        'model'   => \MohamedSamy902\AdvancedFileUpload\Models\FileUpload::class,
+    ],
+];
 ```
 
 ---
 
 ## Usage
 
-### Upload from HTTP Request
-
-The default field name is `file`. Pass `field_name` option to change it.
+### Single File Upload
 
 ```php
 use MohamedSamy902\AdvancedFileUpload\Facades\FileUpload;
 
 public function store(Request $request)
 {
-    $result = FileUpload::upload($request);
+    $result = FileUpload::upload($request->file('avatar'));
 
-    return response()->json($result);
+    // $result is a typed value object
+    return response()->json([
+        'path' => $result->path,
+        'url'  => $result->url,
+        'type' => $result->type, // image | video | audio | pdf | document | other
+    ]);
 }
 ```
 
-**HTML form:**
+The return value is an `UploadResult` object with these properties:
 
-```html
-<form action="{{ route('upload') }}" method="POST" enctype="multipart/form-data">
-    @csrf
-    <input type="file" name="file">
-    <button type="submit">Upload</button>
-</form>
+| Property | Type | Description |
+|---|---|---|
+| `status` | `bool` | Whether the upload succeeded |
+| `path` | `string` | Storage path relative to the disk root |
+| `url` | `string` | Public URL (with CDN rewriting if enabled) |
+| `originalName` | `string` | The original client filename |
+| `mimeType` | `string` | The detected MIME type |
+| `type` | `string` | Logical category: image, video, audio, pdf, document, other |
+| `size` | `int|null` | File size in bytes |
+| `thumbnailUrls` | `array` | Map of thumbnail size name to URL |
+| `databaseId` | `int|null` | Database record ID when tracking is enabled |
+
+`UploadResult` also implements `ArrayAccess`, so existing code using array syntax continues to work:
+
+```php
+$result = FileUpload::upload($file);
+$path = $result['path'];    // still works
+$url  = $result['url'];     // still works
 ```
 
 ---
 
-### Upload Multiple Files
+### Batch Upload
+
+Pass an array of files. Failed items return an error array without interrupting the batch.
 
 ```php
-// HTML: <input type="file" name="files[]" multiple>
-
-$result = FileUpload::upload($request, ['field_name' => 'files']);
-// returns array of results, one per file
-```
-
----
-
-### Upload with Options
-
-```php
-$result = FileUpload::upload($request, [
-    'disk'        => 's3',          // override storage disk
-    'folder_name' => 'avatars',     // sub-folder inside base path
-    'convert_to'  => 'webp',        // override image format
-    'quality'     => 90,            // override image quality
-    'validation_rules' => [
-        'file' => 'required|image|mimes:jpg,png|max:2048',
-    ],
+$files   = $request->file('documents');
+$results = FileUpload::upload($files, [
+    'folder_name'      => 'reports',
+    'validation_rules' => ['file' => 'required|file|mimes:pdf,docx|max:10240'],
 ]);
+
+foreach ($results as $result) {
+    if ($result instanceof \MohamedSamy902\AdvancedFileUpload\ValueObjects\UploadResult) {
+        // success
+        echo $result->url;
+    } else {
+        // failure — $result is an array with 'status', 'error', 'original_name'
+        echo $result['error'];
+    }
+}
 ```
 
 ---
 
-### Upload from URL
+### URL Download and Upload
 
-Downloads the file from a remote URL and stores it.
+Download a remote file and store it, with SSRF protection applied before any HTTP request.
 
 ```php
 $result = FileUpload::upload([], [
-    'url' => 'https://example.com/photo.jpg',
-]);
-
-// Multiple URLs at once:
-$results = FileUpload::upload([], [
-    'url' => [
-        'https://example.com/photo1.jpg',
-        'https://example.com/photo2.jpg',
-    ],
-]);
-```
-
----
-
-### Upload Direct `UploadedFile`
-
-```php
-$file = $request->file('avatar');
-
-$result = FileUpload::upload($file, [
+    'url'         => 'https://cdn.example.com/photo.jpg',
     'folder_name' => 'avatars',
 ]);
 ```
 
----
-
-### Chunked Upload (large files)
-
-Works automatically when using a Request. The JS included in the package sends the file in chunks and reports progress.
+Multiple URLs in a single call:
 
 ```php
-// Controller handles both chunked and regular uploads identically:
-$result = FileUpload::upload($request);
-
-// While chunking in progress, returns:
-// { "done": 45, "status": true }
-
-// When complete, returns the file result array.
-```
-
----
-
-### Delete Files
-
-```php
-// By storage path
-FileUpload::delete('uploads/default/550e8400-e29b-41d4-a716.webp');
-
-// By database ID (when database.enabled = true)
-FileUpload::delete(42);
-
-// Multiple at once
-FileUpload::delete([
-    'uploads/default/uuid1.webp',
-    'uploads/default/uuid2.webp',
+$results = FileUpload::upload([], [
+    'url' => [
+        'https://cdn.example.com/image1.jpg',
+        'https://cdn.example.com/image2.jpg',
+        'https://cdn.example.com/image3.jpg',
+    ],
+    'folder_name' => 'gallery',
 ]);
 ```
 
-Deleting a file also removes its associated thumbnails from storage and its record from the database (if enabled).
+**Restricting permitted domains:**
+
+```php
+// config/file-upload.php
+'url_upload' => [
+    'allowed_domains' => ['cdn.myapp.com', 'assets.partner.com'],
+],
+```
 
 ---
 
-## Response Format
+### Resumable Chunked Upload
 
-Every successful upload returns:
+When a client uploads a large file and the connection is interrupted, the upload can resume from the last successful chunk without starting over.
 
-```json
+**Step 1 — Start a session on your backend:**
+
+```php
+use MohamedSamy902\AdvancedFileUpload\Services\ResumableUploadService;
+
+public function startUpload(Request $request, ResumableUploadService $service)
 {
-    "status": true,
-    "original_name": "photo.jpg",
-    "path": "uploads/avatars/550e8400-e29b-41d4-a716.webp",
-    "url": "https://your-cdn.com/uploads/avatars/550e8400-e29b-41d4-a716.webp",
-    "thumbnail_urls": {
-        "small":  "https://your-cdn.com/uploads/avatars/thumb_small_550e8400.webp",
-        "medium": "https://your-cdn.com/uploads/avatars/thumb_medium_550e8400.webp",
-        "large":  "https://your-cdn.com/uploads/avatars/thumb_large_550e8400.webp"
-    },
-    "mime_type": "image/jpeg",
-    "type": "image"
+    $session = $service->startSession(
+        originalName: $request->input('filename'),
+        mimeType:     $request->input('mime_type'),
+        totalSize:    (int) $request->input('total_size'),
+        totalChunks:  (int) $request->input('total_chunks'),
+        folder:       'uploads',
+    );
+
+    return response()->json(['session_id' => $session->session_id]);
 }
 ```
 
-When `database.enabled = true`, the response also includes the database record fields (`id`, `size`, `disk`, `user_id`, `created_at`, etc.).
-
-Delete returns:
-
-```json
-{ "status": true, "message": "File deleted successfully." }
-```
-
----
-
-## Blade UI
-
-Include the ready-to-use upload form anywhere in your views:
-
-```blade
-@include('advanced-file-upload::upload')
-```
-
-Or after publishing:
-
-```blade
-@include('vendor.advanced-file-upload.upload')
-```
-
-Include the assets manually if needed:
-
-```html
-<link rel="stylesheet" href="{{ asset('vendor/advanced-file-upload/advanced-file-upload.css') }}">
-<script src="{{ asset('vendor/advanced-file-upload/advanced-file-upload.js') }}"></script>
-```
-
----
-
-## Database Model
-
-When `database.enabled = true`, every upload creates a record in the `file_uploads` table:
+**Step 2 — Send each chunk:**
 
 ```php
-use MohamedSamy902\AdvancedFileUpload\Models\FileUpload;
+public function uploadChunk(Request $request, ResumableUploadService $service)
+{
+    $state = $service->uploadChunk(
+        sessionId:  $request->input('session_id'),
+        chunkIndex: (int) $request->input('chunk_index'),
+        chunk:      $request->file('chunk'),
+    );
 
-// All files uploaded by the authenticated user
-$files = FileUpload::where('user_id', auth()->id())->latest()->get();
-
-// Find by ID
-$file = FileUpload::findOrFail(42);
+    return response()->json($state);
+    // {"received": 3, "total": 10, "missing": [3, 4, 5, 6, 7, 8, 9]}
+}
 ```
 
-Table columns: `id`, `original_name`, `name`, `path`, `disk`, `mime_type`, `type`, `size`, `user_id`, `created_at`, `updated_at`.
+**Step 3 — Resume after a failure:**
+
+The client queries which chunks are still missing:
+
+```php
+public function sessionStatus(string $sessionId, ResumableUploadService $service)
+{
+    return response()->json($service->getSession($sessionId));
+    // {"session_id": "...", "status": "pending", "received": 3, "total": 10, "missing": [3, 4, ...]}
+}
+```
+
+The client re-sends only the missing chunks, then calls complete.
+
+**Step 4 — Assemble and store:**
+
+```php
+public function completeUpload(Request $request, ResumableUploadService $service)
+{
+    $result = $service->completeSession($request->input('session_id'));
+
+    return response()->json([
+        'path' => $result->path,
+        'url'  => $result->url,
+    ]);
+}
+```
+
+---
+
+### Image Processing
+
+Enable image processing in the configuration:
+
+```php
+'processing' => [
+    'image' => [
+        'enabled'    => true,
+        'convert_to' => 'webp',   // convert all uploads to WebP
+        'quality'    => 85,
+        'max_width'  => 1920,
+        'upsize'     => false,    // never enlarge images smaller than max_width
+    ],
+],
+```
+
+Override per request:
+
+```php
+$result = FileUpload::upload($file, [
+    'convert_to' => 'jpg',
+    'quality'    => 75,
+]);
+```
+
+**Watermark:**
+
+```php
+// config/file-upload.php
+'processing' => [
+    'image' => [
+        'enabled'    => true,
+        'watermark'  => [
+            'enabled'   => true,
+            'path'      => storage_path('app/watermark.png'),
+            'position'  => 'bottom-right',
+            'opacity'   => 50,
+        ],
+    ],
+],
+```
+
+**Thumbnails:**
+
+```php
+'thumbnails' => [
+    'enabled' => true,
+    'sizes'   => [
+        'sm' => ['width' => 150, 'height' => 150, 'crop' => true],
+        'md' => ['width' => 400, 'height' => 400, 'crop' => false],
+        'lg' => ['width' => 800, 'height' => null, 'crop' => false],
+    ],
+],
+```
+
+The thumbnail URLs are available in the result:
+
+```php
+$result = FileUpload::upload($imageFile);
+echo $result->thumbnailUrls['sm']; // https://cdn.myapp.com/uploads/thumbs/sm_uuid.webp
+echo $result->thumbnailUrls['md'];
+```
+
+---
+
+### CDN URL Rewriting
+
+When a CDN is configured, all generated URLs are automatically rewritten:
+
+```php
+// config/file-upload.php
+'storage' => [
+    'cdn' => [
+        'enabled' => true,
+        'url'     => 'https://cdn.myapp.com',
+    ],
+],
+```
+
+```php
+$result = FileUpload::upload($file);
+echo $result->url;
+// https://cdn.myapp.com/uploads/uuid.jpg
+```
+
+---
+
+### Deleting Files
+
+By storage path (when database tracking is disabled):
+
+```php
+FileUpload::delete('uploads/uuid.jpg');
+```
+
+By database record ID (when tracking is enabled):
+
+```php
+FileUpload::delete(42);
+```
+
+Delete multiple files. Partial failures do not abort the batch:
+
+```php
+$results = FileUpload::delete([
+    'uploads/file1.jpg',
+    'uploads/file2.pdf',
+    'uploads/file3.mp4',
+]);
+
+foreach ($results as $result) {
+    if (!$result['status']) {
+        logger()->error($result['error']);
+    }
+}
+```
+
+---
+
+## Security
+
+### SSRF Protection
+
+All URL downloads are validated before any HTTP request is issued. The following are blocked automatically:
+
+**Private IP address ranges (RFC 1918 and related):**
+
+| Range | Description |
+|---|---|
+| `127.0.0.0/8` | IPv4 loopback |
+| `10.0.0.0/8` | Private network |
+| `172.16.0.0/12` | Private network |
+| `192.168.0.0/16` | Private network |
+| `169.254.0.0/16` | Link-local (AWS Metadata endpoint) |
+| `100.64.0.0/10` | Shared address space (RFC 6598) |
+| `::1/128` | IPv6 loopback |
+| `fc00::/7` | IPv6 unique local |
+| `fe80::/10` | IPv6 link-local |
+
+**Disallowed URL schemes:**
+
+Only `http` and `https` are permitted. The following are blocked: `file://`, `ftp://`, `gopher://`, `data:`, and all others.
+
+**Domain allowlist:**
+
+To restrict URL downloads to specific domains:
+
+```php
+// config/file-upload.php
+'url_upload' => [
+    'allowed_domains' => ['cdn.myapp.com', 'assets.partner.com'],
+],
+```
+
+An empty array permits any public domain.
+
+### Replacing Security Components
+
+Every service is bound to a contract interface. To replace the SSRF validator with your own implementation:
+
+```php
+// In AppServiceProvider::register()
+use MohamedSamy902\AdvancedFileUpload\Contracts\SsrfValidatorContract;
+
+$this->app->bind(SsrfValidatorContract::class, MyCustomSsrfValidator::class);
+```
+
+The same applies to `ImageProcessorContract`, `QuotaManagerContract`, and `FileUploadContract`.
 
 ---
 
 ## Testing
 
+Run the full test suite:
+
 ```bash
-php8.4 vendor/bin/phpunit --testdox
+composer test
 ```
 
+Run static analysis:
+
+```bash
+composer analyse
 ```
-Tests: 33   Assertions: 61   Failures: 0   Errors: 0
-```
+
+The package ships with 140 tests covering:
+
+- Security attack simulation (SSRF, disguised files, DoS)
+- Performance benchmarks (single file, batch of 50, memory usage)
+- Error handling and edge cases
+- Image processing with Intervention Image v3
+- Resumable upload session management
+- All public API surface
 
 ---
 
-## Cloud Storage Setup
+## Changelog
 
-### Amazon S3
+### v2.0.0
 
-```bash
-composer require league/flysystem-aws-s3-v3
-```
+- Upgraded Intervention Image from v2 to v3
+- Minimum PHP version raised to 8.1
+- Minimum Laravel version raised to 10
+- Moved cloud storage packages (`league/flysystem-aws-s3-v3`, `spatie/laravel-google-cloud-storage`) to `suggest`
+- Implemented comprehensive SSRF protection for URL downloads
+- Added `UploadResult` typed value object (implements `ArrayAccess` for backward compatibility)
+- Added resumable chunked upload system with session management
+- Refactored monolithic service into focused, contract-based components
+- Added 107 new tests (total: 140 tests, 345 assertions)
+- Added GitHub Actions CI matrix for PHP 8.1–8.4 and Laravel 10–13
 
-```env
-FILE_UPLOAD_DISK=s3
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
-AWS_DEFAULT_REGION=us-east-1
-AWS_BUCKET=your-bucket
-```
+### v1.0.0
 
-### Google Cloud Storage
-
-```bash
-composer require spatie/laravel-google-cloud-storage
-```
-
-```env
-FILE_UPLOAD_DISK=gcs
-GOOGLE_CLOUD_PROJECT_ID=...
-GOOGLE_CLOUD_KEY_FILE=storage/app/service-account.json
-GOOGLE_CLOUD_STORAGE_BUCKET=your-bucket
-```
+- Initial release
 
 ---
 
 ## Contributing
 
-Pull requests are welcome. For major changes, please open an issue first.
+Contributions are welcome. Please open an issue first to discuss the change you intend to make.
 
-```
 1. Fork the repository
-2. Create your branch: git checkout -b feature/my-feature
-3. Commit your changes: git commit -m 'Add my feature'
-4. Push: git push origin feature/my-feature
-5. Open a Pull Request
-```
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Write tests for your change
+4. Run the test suite: `composer test`
+5. Submit a pull request
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+The MIT License (MIT). Please see [LICENSE](LICENSE) for more information.

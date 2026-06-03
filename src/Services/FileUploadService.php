@@ -1,725 +1,436 @@
 <?php
 
+declare(strict_types=1);
+
 namespace MohamedSamy902\AdvancedFileUpload\Services;
 
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage;
-use Intervention\Image\Facades\Image;
-use Pion\Laravel\ChunkUpload\Receiver\FileReceiver;
-use Pion\Laravel\ChunkUpload\Handler\HandlerFactory;
 use Illuminate\Http\UploadedFile;
-use Illuminate\Support\Str;
-use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Symfony\Component\Mime\MimeTypes;
-use Exception;
+use MohamedSamy902\AdvancedFileUpload\Contracts\FileUploadContract;
+use MohamedSamy902\AdvancedFileUpload\Contracts\QuotaManagerContract;
+use MohamedSamy902\AdvancedFileUpload\ValueObjects\UploadResult;
+use RuntimeException;
 
-class FileUploadService
+/**
+ * Orchestrates file upload operations.
+ *
+ * This class does not implement any storage, validation, downloading, or
+ * processing logic itself. It delegates each concern to a focused dependency:
+ *
+ *   - UrlDownloader     : fetches files from remote URLs
+ *   - FileValidator     : validates MIME types and Laravel validation rules
+ *   - StorageManager    : writes files to disk, generates URLs, handles deletion
+ *   - QuotaManagerContract : enforces per-user storage limits
+ *
+ * The upload() method accepts three source types:
+ *   1. A URL string (or array of URLs) — delegates to UrlDownloader
+ *   2. An Illuminate Request — supports chunked and multi-file uploads
+ *   3. A direct UploadedFile (or array of files)
+ */
+class FileUploadService implements FileUploadContract
 {
+    public function __construct(
+        private readonly UrlDownloader         $urlDownloader,
+        private readonly FileValidator         $fileValidator,
+        private readonly StorageManager        $storageManager,
+        private readonly QuotaManagerContract  $quotaManager,
+    ) {}
+
     /**
-     * Upload a file or multiple files from a Request, direct UploadedFile, or URL.
+     * Uploads a file from the given source to the configured storage disk.
      *
-     * @param  UploadedFile|Request|string|array  $fileOrRequest
-     * @param  array  $options  Available keys: disk, path, folder_name, field_name, validation_rules, url, convert_to, quality
-     * @return array|object|null
-     * @throws Exception
+     * Supported source types:
+     *   - UploadedFile             : single direct file upload
+     *   - UploadedFile[]           : batch direct upload
+     *   - Request                  : handles chunked and multi-file form submissions
+     *   - Any other value, when $options['url'] is set : URL download and upload
+     *
+     * @param mixed $source  The upload source
+     * @param array $options {
+     *     @type string $disk             Override the storage disk
+     *     @type string $path             Override the base storage path
+     *     @type string $folder_name      Override the destination folder
+     *     @type string $field_name       Form field name (default: "file")
+     *     @type array  $validation_rules Per-field custom validation rules
+     *     @type string $url              Remote URL or array of URLs to download
+     *     @type string $convert_to       Target image format (e.g. "webp")
+     *     @type int    $quality          Image compression quality (1–100)
+     * }
+     *
+     * @return UploadResult|array<int, UploadResult|array<string, mixed>>
+     * @throws RuntimeException When the source is invalid or the upload fails
      */
-    public function upload($fileOrRequest, array $options = [])
+    #[\Override]
+    public function upload(mixed $source, array $options = []): UploadResult|array
     {
-        $config = config('file-upload');
-        $disk = $options['disk'] ?? $config['storage']['disk'];
-        $basePath = $options['path'] ?? $config['storage']['path'];
+        $config     = config('file-upload');
+        $disk       = $options['disk']        ?? $config['storage']['disk'];
+        $basePath   = $options['path']        ?? $config['storage']['path'];
         $folderName = $options['folder_name'] ?? $config['storage']['default_folder'];
-        $path = $folderName
-            ? $this->generatePath($basePath, $folderName)
+
+        $this->assertCloudDependenciesInstalled($disk);
+
+        $storagePath = $folderName
+            ? trim($basePath, '/') . '/' . trim($folderName, '/')
             : trim($basePath, '/');
 
-        $customValidationRules = $options['validation_rules'] ?? [];
+        $customRules = $options['validation_rules'] ?? [];
 
         if (isset($options['url'])) {
-            return $this->handleUrlUpload($options['url'], $path, $disk, $options, $customValidationRules);
+            return $this->handleUrlSource($options['url'], $storagePath, $disk, $options, $customRules);
         }
 
-        if ($fileOrRequest instanceof Request) {
-            return $this->handleRequestUpload($fileOrRequest, $path, $disk, $options, $customValidationRules);
+        if ($source instanceof Request) {
+            return $this->handleRequestSource($source, $storagePath, $disk, $options, $customRules);
         }
 
-        return $this->handleDirectUpload($fileOrRequest, $path, $disk, $options, $customValidationRules);
+        return $this->handleDirectSource($source, $storagePath, $disk, $options, $customRules);
     }
 
     /**
-     * Delete a file or multiple files by ID, path, or array of IDs/paths.
+     * Deletes a file or a batch of files.
      *
-     * @param  int|string|array  $idOrPath
-     * @return array
-     * @throws Exception
+     * Accepts an integer database record ID, a storage path string, or an array
+     * of either. Returns a single result array for scalar input or an array of
+     * result arrays for batch input.
+     *
+     * @param int|string|array<int, int|string> $idOrPath
+     * @return array<string, mixed>|array<int, array<string, mixed>>
      */
-    public function delete($idOrPath)
+    #[\Override]
+    public function delete(int|string|array $idOrPath): array
     {
-        if (is_array($idOrPath)) {
-            $results = [];
-            foreach ($idOrPath as $item) {
-                try {
-                    $results[] = $this->processDelete($item);
-                } catch (Exception $e) {
-                    $results[] = ['status' => false, 'error' => $e->getMessage(), 'item' => $item];
-                }
-            }
-            return $results;
+        if (!is_array($idOrPath)) {
+            return $this->storageManager->delete($idOrPath);
         }
 
-        return $this->processDelete($idOrPath);
-    }
+        $results = [];
 
-    // -------------------------------------------------------------------------
-    // Upload Handlers
-    // -------------------------------------------------------------------------
+        foreach ($idOrPath as $item) {
+            try {
+                $results[] = $this->storageManager->delete($item);
+            } catch (\Exception $e) {
+                $results[] = ['status' => false, 'error' => $e->getMessage(), 'item' => $item];
+            }
+        }
+
+        return $results;
+    }
 
     /**
-     * @param  string|array  $urls
+     * Handles uploads initiated from one or more remote URLs.
+     *
+     * Each URL is validated for SSRF safety by the UrlDownloader before
+     * any HTTP request is issued. Failed URLs produce error entries in the
+     * result array without interrupting remaining downloads.
+     *
+     * @param string|array $urls
+     * @param string       $storagePath
+     * @param string       $disk
+     * @param array        $options
+     * @param array        $customRules
+     * @return UploadResult|array<int, UploadResult|array<string, mixed>>
      */
-    protected function handleUrlUpload($urls, string $path, string $disk, array $options, array $customValidationRules)
-    {
-        if (is_array($urls)) {
-            $results = [];
-            foreach ($urls as $url) {
-                try {
-                    $results[] = $this->processUrlUpload($url, $path, $disk, $options, $customValidationRules);
-                } catch (Exception $e) {
-                    Log::error("URL upload failed [{$url}]: " . $e->getMessage());
-                    $results[] = ['status' => false, 'error' => $e->getMessage(), 'url' => $url];
-                }
-            }
-            return $results;
+    private function handleUrlSource(
+        string|array $urls,
+        string       $storagePath,
+        string       $disk,
+        array        $options,
+        array        $customRules,
+    ): UploadResult|array {
+        if (!is_array($urls)) {
+            return $this->processSingleUrl($urls, $storagePath, $disk, $options, $customRules);
         }
 
-        return $this->processUrlUpload($urls, $path, $disk, $options, $customValidationRules);
+        $results = [];
+
+        foreach ($urls as $url) {
+            try {
+                $results[] = $this->processSingleUrl($url, $storagePath, $disk, $options, $customRules);
+            } catch (\Exception $e) {
+                Log::error("URL upload failed [{$url}]: " . $e->getMessage());
+                $results[] = ['status' => false, 'error' => $e->getMessage(), 'url' => $url];
+            }
+        }
+
+        return $results;
     }
 
-    protected function processUrlUpload(string $url, string $path, string $disk, array $options, array $customValidationRules): array
-    {
-        $config = config('file-upload');
+    /**
+     * Downloads a single URL and stores the result.
+     *
+     * @param string $url
+     * @param string $storagePath
+     * @param string $disk
+     * @param array  $options
+     * @param array  $customRules
+     * @return UploadResult
+     */
+    private function processSingleUrl(
+        string $url,
+        string $storagePath,
+        string $disk,
+        array  $options,
+        array  $customRules,
+    ): UploadResult {
         $file = null;
 
         try {
-            $useChunked = ($config['url_download']['enabled'] ?? true)
-                && ($config['url_download']['chunked'] ?? true);
+            $file = $this->urlDownloader->download($url, $options);
 
-            $file = $useChunked
-                ? $this->chunkedDownloadFromUrl($url, $options)
-                : $this->simpleDownloadFromUrl($url, $options);
+            $this->enforceQuota($file);
 
-            if (!$file instanceof UploadedFile || !$file->isValid()) {
-                throw new Exception('Downloaded file is invalid.');
-            }
+            $this->fileValidator->validate($file, $file->getMimeType() ?? '', 'file', $customRules);
 
-            if ($config['quota']['enabled']) {
-                $this->checkQuota($file);
-            }
+            return $this->storageManager->store($file, $storagePath, $disk, $options);
 
-            $result = $this->saveFile($file, $path, $disk, $options, $customValidationRules);
-
-            // Clean up the temp file after successful save
-            if (file_exists($file->getRealPath())) {
-                @unlink($file->getRealPath());
-            }
-
-            return $result;
-        } catch (Exception $e) {
-            if ($file && file_exists($file->getRealPath())) {
-                @unlink($file->getRealPath());
-            }
-            Log::error("URL upload error [{$url}]: " . $e->getMessage());
-            throw new Exception('Failed to upload from URL: ' . $e->getMessage());
+        } finally {
+            $this->cleanupTempFile($file);
         }
     }
 
-    protected function handleRequestUpload(Request $request, string $path, string $disk, array $options, array $customValidationRules)
-    {
-        $config = config('file-upload');
+    /**
+     * Handles uploads submitted through an HTTP Request object.
+     *
+     * Supports three sub-cases:
+     *   1. Chunked upload (via pion/laravel-chunk-upload) — returns progress JSON
+     *      for incomplete chunks and a result for the final chunk.
+     *   2. Multiple files under a "files" field.
+     *   3. Single file under the configured field name.
+     *
+     * @param Request $request
+     * @param string  $storagePath
+     * @param string  $disk
+     * @param array   $options
+     * @param array   $customRules
+     * @return UploadResult|array
+     */
+    private function handleRequestSource(
+        Request $request,
+        string  $storagePath,
+        string  $disk,
+        array   $options,
+        array   $customRules,
+    ): UploadResult|array {
         $fieldName = $options['field_name'] ?? 'file';
 
-        $receiver = new FileReceiver($fieldName, $request, HandlerFactory::classFromRequest($request));
+        // Chunked upload via pion/laravel-chunk-upload is optional.
+        // When the package is not installed, Request-based chunked uploads fall through
+        // to normal single/multi-file processing.
+        if (
+            class_exists('Pion\Laravel\ChunkUpload\Receiver\FileReceiver')
+            && class_exists('Pion\Laravel\ChunkUpload\Handler\HandlerFactory')
+        ) {
+            $receiver = new \Pion\Laravel\ChunkUpload\Receiver\FileReceiver(
+                $fieldName,
+                $request,
+                \Pion\Laravel\ChunkUpload\Handler\HandlerFactory::classFromRequest($request),
+            );
 
-        if ($receiver->isUploaded()) {
-            $save = $receiver->receive();
-
-            if ($save->isFinished()) {
-                $file = $save->getFile();
-                if ($config['quota']['enabled']) {
-                    $this->checkQuota($file);
-                }
-                return $this->saveFile($file, $path, $disk, $options, $customValidationRules);
+            if ($receiver->isUploaded()) {
+                return $this->handleChunkedReceiver($receiver, $storagePath, $disk, $options, $customRules);
             }
-
-            return response()->json([
-                'done' => $save->handler()->getPercentageDone(),
-                'status' => true,
-            ]);
         }
 
         $files = $request->file('files') ?? $request->file($fieldName);
 
         if (is_array($files)) {
-            $results = [];
-            foreach ($files as $file) {
-                if ($file instanceof UploadedFile && $file->isValid()) {
-                    if ($config['quota']['enabled']) {
-                        $this->checkQuota($file);
-                    }
-                    $results[] = $this->saveFile($file, $path, $disk, $options, $customValidationRules);
-                } else {
-                    $name = $file instanceof UploadedFile ? $file->getClientOriginalName() : 'unknown';
-                    Log::warning("Invalid file in request: {$name}");
-                    $results[] = ['status' => false, 'error' => 'Invalid file.', 'original_name' => $name];
-                }
-            }
-            return $results;
+            return $this->processFileArray($files, $storagePath, $disk, $options, $customRules);
         }
 
         $file = $request->file($fieldName);
-        if (!$file instanceof UploadedFile || !$file->isValid()) {
-            throw new Exception('Invalid file.');
-        }
-
-        if ($config['quota']['enabled']) {
-            $this->checkQuota($file);
-        }
-
-        return $this->saveFile($file, $path, $disk, $options, $customValidationRules);
-    }
-
-    protected function handleDirectUpload($file, string $path, string $disk, array $options, array $customValidationRules)
-    {
-        $config = config('file-upload');
-
-        if (is_array($file)) {
-            $results = [];
-            foreach ($file as $singleFile) {
-                if ($singleFile instanceof UploadedFile && $singleFile->isValid()) {
-                    if ($config['quota']['enabled']) {
-                        $this->checkQuota($singleFile);
-                    }
-                    $results[] = $this->saveFile($singleFile, $path, $disk, $options, $customValidationRules);
-                } else {
-                    $name = $singleFile instanceof UploadedFile ? $singleFile->getClientOriginalName() : 'unknown';
-                    Log::warning("Invalid direct file: {$name}");
-                    $results[] = ['status' => false, 'error' => 'Invalid file.', 'original_name' => $name];
-                }
-            }
-            return $results;
-        }
 
         if (!$file instanceof UploadedFile || !$file->isValid()) {
-            throw new Exception('Invalid file.');
+            throw new RuntimeException('The uploaded file is invalid or missing.');
         }
 
-        if ($config['quota']['enabled']) {
-            $this->checkQuota($file);
-        }
+        $this->enforceQuota($file);
 
-        return $this->saveFile($file, $path, $disk, $options, $customValidationRules);
-    }
+        $this->fileValidator->validate($file, $file->getMimeType() ?? '', $fieldName, $customRules);
 
-    // -------------------------------------------------------------------------
-    // URL Downloaders
-    // -------------------------------------------------------------------------
-
-    /**
-     * Download a file from a URL using chunked (in-memory) approach with retry on 429.
-     */
-    protected function chunkedDownloadFromUrl(string $url, array $options): UploadedFile
-    {
-        $timeout = $options['timeout'] ?? config('file-upload.url_download.timeout', 30);
-        $maxSize = $options['max_size'] ?? config('file-upload.url_download.max_size', 1024 * 1024 * 50);
-        $maxRetries = 3;
-        $response = null;
-        $tempPath = null;
-
-        try {
-            for ($attempt = 0; $attempt <= $maxRetries; $attempt++) {
-                $response = Http::timeout($timeout)
-                    ->withHeaders(['Accept' => '*/*'])
-                    ->get($url);
-
-                if ($response->successful()) {
-                    break;
-                }
-
-                if ($response->status() === 429 && $attempt < $maxRetries) {
-                    $delay = (int) pow(2, $attempt);
-                    Log::info("Rate limited by {$url}, retrying in {$delay}s (attempt {$attempt}/{$maxRetries})");
-                    sleep($delay);
-                    continue;
-                }
-
-                break;
-            }
-
-            if (!$response || $response->failed()) {
-                throw new Exception('Failed to download file. HTTP status: ' . ($response ? $response->status() : 'N/A'));
-            }
-
-            $contentType = $this->parseMimeType($response->header('Content-Type', ''));
-            $this->validateAllowedMimeType($contentType);
-
-            if (strlen($response->body()) > $maxSize) {
-                throw new Exception('File exceeds maximum allowed size of ' . round($maxSize / (1024 * 1024), 2) . 'MB.');
-            }
-
-            $extension = $this->getExtensionFromMime($contentType, $url);
-            $originalName = pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_FILENAME) ?: 'file';
-            $tempPath = sys_get_temp_dir() . '/' . Str::uuid() . '.' . $extension;
-
-            if (file_put_contents($tempPath, $response->body()) === false) {
-                throw new Exception('Failed to write temporary file.');
-            }
-
-            return new UploadedFile($tempPath, "{$originalName}.{$extension}", $contentType, null, true);
-        } catch (Exception $e) {
-            if ($tempPath && file_exists($tempPath)) {
-                @unlink($tempPath);
-            }
-            Log::error("Chunked URL download error [{$url}]: " . $e->getMessage());
-            throw new Exception('Download failed: ' . $e->getMessage());
-        }
+        return $this->storageManager->store($file, $storagePath, $disk, $options);
     }
 
     /**
-     * Download a file from a URL by streaming directly to a temp file (memory-efficient).
+     * Processes a chunked upload receiver from pion/laravel-chunk-upload.
+     *
+     * Returns a JSON progress response for incomplete chunks or a typed
+     * UploadResult when the final chunk completes the file.
+     *
+     * @param object $receiver A FileReceiver instance (type-erased to avoid hard dependency)
+     * @param string $storagePath
+     * @param string $disk
+     * @param array  $options
+     * @param array  $customRules
+     * @return UploadResult|\Illuminate\Http\JsonResponse
      */
-    protected function simpleDownloadFromUrl(string $url, array $options): UploadedFile
-    {
-        $timeout = $options['timeout'] ?? config('file-upload.url_download.timeout', 30);
-        $maxSize = $options['max_size'] ?? config('file-upload.url_download.max_size', 1024 * 1024 * 50);
-        $tempPath = sys_get_temp_dir() . '/' . Str::uuid() . '.tmp';
+    private function handleChunkedReceiver(
+        object $receiver,
+        string $storagePath,
+        string $disk,
+        array  $options,
+        array  $customRules,
+    ): UploadResult|\Illuminate\Http\JsonResponse {
+        $save = $receiver->receive();
 
-        try {
-            $headResponse = Http::timeout(10)->head($url);
-
-            if ($headResponse->failed()) {
-                throw new Exception('Cannot access file URL. HTTP status: ' . $headResponse->status());
-            }
-
-            $contentLength = $headResponse->header('Content-Length');
-            $contentType = $this->parseMimeType($headResponse->header('Content-Type', ''));
-
-            if ($contentLength && (int) $contentLength > $maxSize) {
-                throw new Exception('File exceeds maximum allowed size.');
-            }
-
-            $this->validateAllowedMimeType($contentType);
-
-            $response = Http::timeout($timeout)
-                ->withOptions(['sink' => $tempPath])
-                ->get($url);
-
-            if ($response->failed()) {
-                throw new Exception('Failed to download file. HTTP status: ' . $response->status());
-            }
-
-            if (filesize($tempPath) > $maxSize) {
-                @unlink($tempPath);
-                throw new Exception('File exceeds maximum allowed size.');
-            }
-
-            $extension = $this->getExtensionFromMime($contentType, $url);
-            $originalName = pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_FILENAME) ?: 'file';
-
-            return new UploadedFile($tempPath, "{$originalName}.{$extension}", $contentType, null, true);
-        } catch (Exception $e) {
-            if (file_exists($tempPath)) {
-                @unlink($tempPath);
-            }
-            Log::error("Simple URL download error [{$url}]: " . $e->getMessage());
-            throw new Exception('Download failed: ' . $e->getMessage());
+        if ($save->isFinished()) {
+            $file = $save->getFile();
+            $this->enforceQuota($file);
+            $this->fileValidator->validate($file, $file->getMimeType() ?? '', 'file', $customRules);
+            return $this->storageManager->store($file, $storagePath, $disk, $options);
         }
+
+        return response()->json([
+            'done'   => $save->handler()->getPercentageDone(),
+            'status' => true,
+        ]);
     }
 
-    // -------------------------------------------------------------------------
-    // Core Save Logic
-    // -------------------------------------------------------------------------
-
-    protected function saveFile(UploadedFile $file, string $path, string $disk, array $options, array $customValidationRules): array
-    {
-        $config = config('file-upload');
-        $mime = $file->getMimeType();
-        $originalName = $file->getClientOriginalName();
-        $extension = $file->getClientOriginalExtension() ?: $file->extension();
-
-        // Resolve final extension early — if image will be converted, the filename must reflect that
-        $isImage = str_starts_with($mime, 'image');
-        $imageProcessingEnabled = $isImage && ($config['processing']['image']['enabled'] ?? false);
-        if ($imageProcessingEnabled) {
-            $convertTo = $options['convert_to'] ?? $config['processing']['image']['convert_to'] ?? null;
-            if ($convertTo) {
-                $extension = $convertTo;
-            }
+    /**
+     * Handles a direct UploadedFile or array of UploadedFiles passed by the caller.
+     *
+     * @param mixed  $source
+     * @param string $storagePath
+     * @param string $disk
+     * @param array  $options
+     * @param array  $customRules
+     * @return UploadResult|array
+     */
+    private function handleDirectSource(
+        mixed  $source,
+        string $storagePath,
+        string $disk,
+        array  $options,
+        array  $customRules,
+    ): UploadResult|array {
+        if (is_array($source)) {
+            return $this->processFileArray($source, $storagePath, $disk, $options, $customRules);
         }
 
-        $fileName = Str::uuid() . '.' . $extension;
-        $fullPath = $path . '/' . $fileName;
-
-        $this->validateFile($file, $mime, $options['field_name'] ?? 'file', $customValidationRules);
-
-        try {
-            if ($imageProcessingEnabled) {
-                $image = Image::make($file->getRealPath());
-                $processedContent = $this->processImage($image, $config['processing']['image'], $options);
-                Storage::disk($disk)->put($fullPath, $processedContent);
-            } else {
-                Storage::disk($disk)->put($fullPath, file_get_contents($file->getRealPath()));
-            }
-
-            $thumbnailUrls = [];
-            if ($isImage && ($config['thumbnails']['enabled'] ?? false)) {
-                $thumbnailUrls = $this->generateThumbnails(
-                    $fullPath,
-                    $disk,
-                    $file->getRealPath(),
-                    $config['thumbnails']['sizes'],
-                    $fileName
-                );
-            }
-
-            $fileData = [];
-            if ($config['database']['enabled'] ?? false) {
-                $modelClass = $config['database']['model'];
-                $fileData = $modelClass::create([
-                    'original_name' => $originalName,
-                    'name'          => $fileName,
-                    'path'          => $fullPath,
-                    'disk'          => $disk,
-                    'mime_type'     => $mime,
-                    'size'          => $file->getSize(),
-                    'type'          => $this->getFileType($mime),
-                    'user_id'       => auth()->id(),
-                ])->toArray();
-            }
-
-            return array_merge([
-                'status'         => true,
-                'original_name'  => $originalName,
-                'path'           => $fullPath,
-                'url'            => $this->getFileUrl($config, $disk, $fullPath),
-                'thumbnail_urls' => $thumbnailUrls,
-                'mime_type'      => $mime,
-                'type'           => $this->getFileType($mime),
-            ], $fileData);
-        } catch (Exception $e) {
-            if (Storage::disk($disk)->exists($fullPath)) {
-                Storage::disk($disk)->delete($fullPath);
-            }
-            Log::error("File save failed: " . $e->getMessage());
-            throw new Exception('Failed to save file: ' . $e->getMessage());
+        if (!$source instanceof UploadedFile || !$source->isValid()) {
+            throw new RuntimeException('Invalid file: expected a valid UploadedFile instance.');
         }
+
+        $this->enforceQuota($source);
+
+        $this->fileValidator->validate($source, $source->getMimeType() ?? '', 'file', $customRules);
+
+        return $this->storageManager->store($source, $storagePath, $disk, $options);
     }
 
-    // -------------------------------------------------------------------------
-    // Delete Logic
-    // -------------------------------------------------------------------------
+    /**
+     * Processes an array of files, collecting results and continuing on partial failures.
+     *
+     * Invalid or failed entries produce error arrays in the result set.
+     * The batch is never aborted due to a single file failure.
+     *
+     * @param array  $files
+     * @param string $storagePath
+     * @param string $disk
+     * @param array  $options
+     * @param array  $customRules
+     * @return array<int, UploadResult|array<string, mixed>>
+     */
+    private function processFileArray(
+        array  $files,
+        string $storagePath,
+        string $disk,
+        array  $options,
+        array  $customRules,
+    ): array {
+        $results = [];
 
-    protected function processDelete($idOrPath): array
-    {
-        $config = config('file-upload');
-
-        try {
-            if ($config['database']['enabled'] ?? false) {
-                $modelClass = $config['database']['model'];
-                $file = is_numeric($idOrPath)
-                    ? $modelClass::findOrFail($idOrPath)
-                    : $modelClass::where('path', $idOrPath)->firstOrFail();
-
-                $disk = $file->disk ?? $config['storage']['disk'];
-
-                if (Storage::disk($disk)->exists($file->path)) {
-                    Storage::disk($disk)->delete($file->path);
-                } else {
-                    Log::warning("File not found in storage during delete: {$file->path}");
-                }
-
-                if ($config['thumbnails']['enabled'] ?? false) {
-                    $dir = dirname($file->path);
-                    foreach (array_keys($config['thumbnails']['sizes']) as $sizeName) {
-                        $thumbPath = "{$dir}/thumb_{$sizeName}_{$file->name}";
-                        if (Storage::disk($disk)->exists($thumbPath)) {
-                            Storage::disk($disk)->delete($thumbPath);
-                        }
-                    }
-                }
-
-                $file->delete();
-                Log::info("File deleted (ID/Path: {$idOrPath}).");
-            } else {
-                if (!is_string($idOrPath)) {
-                    throw new Exception('A file path (string) is required when database storage is disabled.');
-                }
-                $disk = $config['storage']['disk'];
-                if (!Storage::disk($disk)->exists($idOrPath)) {
-                    throw new Exception('File not found in storage.');
-                }
-                Storage::disk($disk)->delete($idOrPath);
-                Log::info("File deleted from storage: {$idOrPath}.");
+        foreach ($files as $file) {
+            if (!$file instanceof UploadedFile || !$file->isValid()) {
+                $name      = $file instanceof UploadedFile ? $file->getClientOriginalName() : 'unknown';
+                $results[] = ['status' => false, 'error' => 'Invalid file.', 'original_name' => $name];
+                continue;
             }
 
-            return ['status' => true, 'message' => 'File deleted successfully.'];
-        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
-            Log::error("File not found in database: {$idOrPath}");
-            throw new Exception('File not found in database.');
-        } catch (Exception $e) {
-            Log::error("Delete error (ID/Path: {$idOrPath}): " . $e->getMessage());
-            throw new Exception('Failed to delete file: ' . $e->getMessage());
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Image Processing
-    // -------------------------------------------------------------------------
-
-    protected function processImage(\Intervention\Image\Image $image, array $config, array $options): string
-    {
-        try {
-            $resize = $config['resize'] ?? [];
-            if (!empty($resize['width']) || !empty($resize['height'])) {
-                $image->resize(
-                    $resize['width'] ?? null,
-                    $resize['height'] ?? null,
-                    function ($constraint) use ($resize) {
-                        if ($resize['maintain_aspect_ratio'] ?? true) {
-                            $constraint->aspectRatio();
-                        }
-                        if (($resize['upsize'] ?? false) === false) {
-                            $constraint->upsize();
-                        }
-                    }
-                );
-            }
-
-            $watermark = $config['watermark'] ?? [];
-            if (!empty($watermark['enabled']) && !empty($watermark['path'])) {
-                $watermarkPath = public_path($watermark['path']);
-                if (file_exists($watermarkPath)) {
-                    $image->insert(
-                        $watermarkPath,
-                        $watermark['position'] ?? 'bottom-right',
-                        $watermark['x_offset'] ?? 10,
-                        $watermark['y_offset'] ?? 10
-                    );
-                    if (isset($watermark['opacity'])) {
-                        $image->opacity($watermark['opacity']);
-                    }
-                } else {
-                    Log::warning("Watermark file not found: {$watermarkPath}");
-                }
-            }
-
-            $allowedFilters = ['brightness', 'contrast', 'greyscale', 'blur', 'sharpen', 'pixelate', 'flip', 'rotate'];
-            foreach ($config['filters'] ?? [] as $filter => $value) {
-                if (!in_array($filter, $allowedFilters, true)) {
-                    Log::warning("Disallowed image filter skipped: {$filter}");
-                    continue;
-                }
-                if (method_exists($image, $filter)) {
-                    $image->$filter($value);
-                }
-            }
-
-            $format = $options['convert_to'] ?? $config['convert_to'] ?? null;
-            $quality = $options['quality'] ?? $config['quality'] ?? 85;
-
-            return (string) $image->encode($format, $quality);
-        } catch (Exception $e) {
-            Log::error("Image processing failed: " . $e->getMessage());
-            throw new Exception('Image processing failed: ' . $e->getMessage());
-        }
-    }
-
-    protected function generateThumbnails(string $fullPath, string $disk, string $realPath, array $sizes, string $fileName): array
-    {
-        try {
-            $image = Image::make($realPath);
-        } catch (Exception $e) {
-            Log::error("Failed to load image for thumbnails: " . $e->getMessage());
-            return [];
-        }
-
-        $dir = dirname($fullPath);
-        $baseName = pathinfo($fileName, PATHINFO_FILENAME);
-        $ext = pathinfo($fileName, PATHINFO_EXTENSION);
-        $thumbnailUrls = [];
-
-        foreach ($sizes as $sizeName => $dimensions) {
             try {
-                $thumb = clone $image;
-                $width = $dimensions['width'] ?? null;
-                $height = $dimensions['height'] ?? null;
-                $crop = $dimensions['crop'] ?? false;
-
-                if ($crop && $width && $height) {
-                    $thumb->fit($width, $height, fn ($c) => $c->upsize());
-                } elseif ($width || $height) {
-                    $thumb->resize($width, $height, function ($c) {
-                        $c->aspectRatio();
-                        $c->upsize();
-                    });
-                }
-
-                $thumbPath = "{$dir}/thumb_{$sizeName}_{$baseName}.{$ext}";
-                Storage::disk($disk)->put($thumbPath, (string) $thumb->encode());
-                $thumbnailUrls[$sizeName] = $this->getFileUrl(config('file-upload'), $disk, $thumbPath);
-            } catch (Exception $e) {
-                Log::error("Thumbnail generation failed for size [{$sizeName}]: " . $e->getMessage());
+                $this->enforceQuota($file);
+                $this->fileValidator->validate($file, $file->getMimeType() ?? '', 'file', $customRules);
+                $results[] = $this->storageManager->store($file, $storagePath, $disk, $options);
+            } catch (\Exception $e) {
+                $results[] = [
+                    'status'        => false,
+                    'error'         => $e->getMessage(),
+                    'original_name' => $file->getClientOriginalName(),
+                ];
             }
         }
 
-        return $thumbnailUrls;
+        return $results;
     }
 
-    // -------------------------------------------------------------------------
-    // Validation & Helpers
-    // -------------------------------------------------------------------------
-
-    protected function validateFile(UploadedFile $file, string $mimeType, string $fieldName, array $customValidationRules): void
+    /**
+     * Checks the quota for the authenticated user before storing a file.
+     *
+     * Does nothing when quota enforcement is disabled or no user is authenticated.
+     *
+     * @param UploadedFile $file
+     * @throws \MohamedSamy902\AdvancedFileUpload\Exceptions\QuotaExceededException
+     */
+    private function enforceQuota(UploadedFile $file): void
     {
-        if (isset($customValidationRules[$fieldName])) {
-            $rule = $customValidationRules[$fieldName];
-        } else {
-            $rules = config('file-upload.validation');
-            $type = explode('/', $mimeType)[0];
-            $rule = $rules['custom_fields'][$fieldName] ?? $rules[$type] ?? $rules['other'];
-        }
-
-        $validator = Validator::make([$fieldName => $file], [$fieldName => $rule]);
-
-        if ($validator->fails()) {
-            throw new Exception($validator->errors()->first());
-        }
-    }
-
-    protected function validateAllowedMimeType(string $mimeType): void
-    {
-        $allowed = config('file-upload.url_download.allowed_mimes');
-        if (empty($allowed)) {
+        if (!(config('file-upload.quota.enabled') ?? false) || !auth()->check()) {
             return;
         }
 
-        $parts = explode('/', $mimeType);
-        $fileType = $parts[0] ?? '';
-        $fileSubtype = $parts[1] ?? '';
-
-        $isAllowed = (isset($allowed[$fileType]) && in_array($fileSubtype, $allowed[$fileType], true))
-            || (isset($allowed['other']) && (empty($allowed['other']) || in_array($fileSubtype, $allowed['other'], true)));
-
-        if (!$isAllowed) {
-            throw new Exception("MIME type [{$mimeType}] is not allowed for URL uploads.");
-        }
+        $this->quotaManager->check((int) auth()->id(), (int) $file->getSize());
     }
 
-    protected function checkQuota(UploadedFile $file): void
+    /**
+     * Verifies that the required driver package is installed for cloud disks.
+     *
+     * Throws a RuntimeException with an actionable install command when the
+     * adapter class is absent, rather than letting PHP throw a cryptic error.
+     *
+     * @param string $disk
+     * @throws RuntimeException
+     */
+    protected function assertCloudDependenciesInstalled(string $disk): void
     {
-        $config = config('file-upload.quota');
-
-        if (!($config['enabled'] ?? false) || !auth()->check()) {
-            return;
-        }
-
-        $modelClass = config('file-upload.database.model');
-        $totalSize = $modelClass::where('user_id', auth()->id())->sum('size');
-
-        if (($totalSize + $file->getSize()) > $config['max_size_per_user']) {
-            $maxMB = round($config['max_size_per_user'] / (1024 * 1024), 2);
-            Log::warning("Storage quota exceeded for user: " . auth()->id());
-            throw new Exception("Storage quota exceeded. Maximum allowed: {$maxMB}MB.");
-        }
-    }
-
-    protected function parseMimeType(string $contentType): string
-    {
-        return trim(explode(';', $contentType)[0]);
-    }
-
-    protected function getExtensionFromMime(string $mime, string $url): string
-    {
-        $extensions = (new MimeTypes())->getExtensions($mime);
-        if (!empty($extensions)) {
-            // Prefer common short forms (jpg over jpeg)
-            $preferred = ['jpeg' => 'jpg'];
-            return $preferred[$extensions[0]] ?? $extensions[0];
-        }
-
-        $fallback = [
-            'image/jpeg'    => 'jpg',
-            'image/png'     => 'png',
-            'image/gif'     => 'gif',
-            'image/webp'    => 'webp',
-            'video/mp4'     => 'mp4',
-            'video/quicktime' => 'mov',
-            'video/x-msvideo' => 'avi',
-            'video/x-matroska' => 'mkv',
-            'video/webm'    => 'webm',
-            'application/pdf' => 'pdf',
-            'application/msword' => 'doc',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document' => 'docx',
-            'application/vnd.ms-excel' => 'xls',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' => 'xlsx',
-            'application/vnd.ms-powerpoint' => 'ppt',
-            'application/vnd.openxmlformats-officedocument.presentationml.presentation' => 'pptx',
-            'text/plain'    => 'txt',
-            'text/csv'      => 'csv',
-            'text/xml'      => 'xml',
-            'application/json' => 'json',
+        $requirements = [
+            's3'  => [
+                'class'   => 'League\Flysystem\AwsS3V3\AwsS3V3Adapter',
+                'package' => 'league/flysystem-aws-s3-v3',
+            ],
+            'gcs' => [
+                'class'   => 'Spatie\LaravelGoogleCloudStorage\GoogleCloudStorageAdapter',
+                'package' => 'spatie/laravel-google-cloud-storage',
+            ],
         ];
 
-        return $fallback[$mime]
-            ?? pathinfo(parse_url($url, PHP_URL_PATH), PATHINFO_EXTENSION)
-            ?: 'bin';
-    }
-
-    protected function getFileType(string $mime): string
-    {
-        if (str_starts_with($mime, 'image')) return 'image';
-        if (str_starts_with($mime, 'video')) return 'video';
-        if (str_starts_with($mime, 'audio')) return 'audio';
-        if ($mime === 'application/pdf') return 'pdf';
-        if (in_array($mime, [
-            'application/msword',
-            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            'application/vnd.ms-excel',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            'application/vnd.ms-powerpoint',
-            'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-            'text/plain',
-        ])) return 'document';
-
-        return 'other';
-    }
-
-    protected function generatePath(string $basePath, string $folderName): string
-    {
-        return trim($basePath . '/' . $folderName, '/');
-    }
-
-    protected function getFileUrl(array $config, string $disk, string $path): string
-    {
-        $url = Storage::disk($disk)->url($path);
-
-        if (($config['storage']['cdn']['enabled'] ?? false) && !empty($config['storage']['cdn']['url'])) {
-            $relativePath = ltrim(parse_url($url, PHP_URL_PATH), '/');
-            $url = rtrim($config['storage']['cdn']['url'], '/') . '/' . $relativePath;
+        if (!isset($requirements[$disk])) {
+            return;
         }
 
-        return $url;
+        if (!class_exists($requirements[$disk]['class'])) {
+            $pkg = $requirements[$disk]['package'];
+            throw new RuntimeException(
+                "Storage disk [{$disk}] requires the [{$pkg}] package. "
+                . "Install it with: composer require {$pkg}"
+            );
+        }
     }
 
-    protected function compressFile(string $content, string $extension): string
+    /**
+     * Removes a temp file left by a URL download, ignoring errors.
+     *
+     * @param UploadedFile|null $file
+     */
+    private function cleanupTempFile(?UploadedFile $file): void
     {
-        $textTypes = ['txt', 'csv', 'xml', 'json'];
-
-        if (in_array(strtolower($extension), $textTypes, true) && function_exists('gzencode')) {
-            return gzencode($content, 9);
+        if ($file === null) {
+            return;
         }
 
-        return $content;
+        $path = $file->getRealPath();
+
+        if ($path !== false && file_exists($path)) {
+            @unlink($path);
+        }
     }
 }
