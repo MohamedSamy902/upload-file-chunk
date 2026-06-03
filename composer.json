@@ -4,10 +4,10 @@
     "type": "library",
     "license": "MIT",
     "keywords": ["laravel", "file-upload", "image", "storage", "s3", "chunk", "cdn", "thumbnail", "ssrf", "resumable"],
-    "homepage": "https://github.com/MohamedSamy902/laravel-advanced-file-upload",
+    "homepage": "https://github.com/MohamedSamy902/uplade-file-chunk",
     "support": {
-        "source": "https://github.com/MohamedSamy902/laravel-advanced-file-upload",
-        "issues": "https://github.com/MohamedSamy902/laravel-advanced-file-upload/issues"
+        "source": "https://github.com/MohamedSamy902/uplade-file-chunk",
+        "issues": "https://github.com/MohamedSamy902/uplade-file-chunk/issues"
     },
     "authors": [
         {
