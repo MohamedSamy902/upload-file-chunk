@@ -48,15 +48,16 @@ jobs:
 
       - name: Install dependencies
         run: |
+          composer require --dev \
+            "orchestra/testbench:${{ steps.testbench.outputs.version }}" \
+            --no-update --no-interaction
           composer require \
             "laravel/framework:${{ matrix.laravel }}" \
-            "orchestra/testbench:${{ steps.testbench.outputs.version }}" \
-            "guzzlehttp/guzzle:^7.8" \
             --no-update --no-interaction
           composer update --prefer-stable --prefer-dist --no-interaction
 
       - name: Run tests
-        run: vendor/bin/phpunit --colors=always --display-deprecations --fail-on-deprecation=false
+        run: vendor/bin/phpunit --colors=always --fail-on-deprecation=false
 
       - name: Upload coverage
         if: matrix.php == '8.3' && matrix.laravel == '12.*'
