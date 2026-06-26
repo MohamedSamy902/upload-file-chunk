@@ -20,6 +20,8 @@ A production-ready Laravel package for chunked uploads, image processing, URL do
   - [Image Processing](#image-processing)
   - [CDN URL Rewriting](#cdn-url-rewriting)
   - [Deleting Files](#deleting-files)
+  - [HasUploads Trait](#hasuploads-trait)
+- [Media Manager Dashboard (SPA)](#media-manager-dashboard-spa)
 - [Security](#security)
 - [Events](#events)
 - [Testing](#testing)
@@ -424,6 +426,52 @@ foreach ($results as $result) {
     }
 }
 ```
+
+---
+
+### HasUploads Trait
+
+You can attach the `HasUploads` trait to any Eloquent model to automatically retrieve its linked media.
+
+```php
+use Illuminate\Database\Eloquent\Model;
+use MohamedSamy902\AdvancedFileUpload\Traits\HasUploads;
+
+class Article extends Model
+{
+    use HasUploads;
+}
+```
+
+Then, quickly retrieve the image URL directly from your model:
+
+```php
+$article = Article::find(1);
+
+// Get original image URL
+echo $article->getMediaUrl('image', 'original');
+
+// Get thumbnail size (must be enabled in config)
+echo $article->getMediaUrl('image', 'small'); 
+
+// Get an array of all thumbnails for the model's latest image
+$thumbs = $article->getThumbnails();
+```
+
+---
+
+## Media Manager Dashboard (SPA)
+
+The package ships with a **Production-Ready, Enterprise-grade Single Page Application (SPA)** dashboard for tracking uploads, checking disk space, identifying unused orphaned files, and configuring settings safely.
+
+Once installed and the config `database.enabled` is `true`, simply navigate to:
+**`your-app.com/advanced-file-upload`**
+
+### Features:
+- ⚡ **PJAX Powered:** Blazing fast, zero-reload navigation. Search inputs and filters preserve your cursor focus instantly.
+- 🎨 **Premium UI/UX:** Built with modern Glassmorphism, smooth animations, and high-quality UI components.
+- 📊 **Filter-Aware Stats:** The summary dashboard instantly updates metrics (Storage Used, Active/Unused Files) to match your search and filter parameters dynamically.
+- 🧹 **Bulk Actions & Orphan Scanning:** Select multiple files to force-delete them from disk, or scan for missing database records easily.
 
 ---
 

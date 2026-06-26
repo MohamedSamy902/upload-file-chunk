@@ -374,11 +374,12 @@ class FileUploadService implements FileUploadContract
      */
     private function enforceQuota(UploadedFile $file): void
     {
-        if (!(config('file-upload.quota.enabled') ?? false) || !auth()->check()) {
+        // ✅ Fixed: removed extra parentheses that caused null to be treated as true
+        if (!config('file-upload.quota.enabled', false) || !Auth::check()) {
             return;
         }
 
-        $this->quotaManager->check((int) auth()->id(), (int) $file->getSize());
+        $this->quotaManager->check((int) Auth::id(), (int) $file->getSize());
     }
 
     /**

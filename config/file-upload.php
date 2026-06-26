@@ -208,4 +208,16 @@ return [
         'level'   => 'info',
     ],
 
+    // =========================================================================
+    // Media Manager UI Dashboard
+    // =========================================================================
+
+    'ui' => [
+        // Route prefix for the dashboard (e.g. /advanced-file-upload)
+        'route_prefix' => env('FILE_UPLOAD_UI_PREFIX', 'advanced-file-upload'),
+        // Middleware applied to all dashboard routes
+        // Add 'auth' to require login, or a custom middleware like 'admin'
+        'middleware'   => ['web'],
+    ],
+
 ];

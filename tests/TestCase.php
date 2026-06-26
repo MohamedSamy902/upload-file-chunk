@@ -42,6 +42,8 @@ abstract class TestCase extends BaseTestCase
         $app['config']->set('file-upload.database.enabled', false);
         $app['config']->set('file-upload.quota.enabled', false);
         $app['config']->set('file-upload.security.rate_limit.enabled', false);
+        
+        $app['config']->set('app.key', 'base64:JbH1T8/s+cZqKqP7wW9/VbYt9E6mJtKqQ5yQ4oH0Ycw=');
     }
 
     /**

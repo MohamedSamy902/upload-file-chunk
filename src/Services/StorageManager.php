@@ -57,6 +57,7 @@ final class StorageManager
         $extension    = $this->resolveExtension($file, $mime, $config, $options);
         $fileName     = Str::uuid() . '.' . $extension;
         $fullPath     = ltrim($path . '/' . $fileName, '/');
+        $thumbnailUrls = [];
 
         try {
             $this->writeFile($file, $fullPath, $disk, $mime, $config, $options);
@@ -66,7 +67,7 @@ final class StorageManager
             );
 
             $databaseId = $this->maybeWriteRecord(
-                $originalName, $fileName, $fullPath, $disk, $mime, $file->getSize(), $config
+                $originalName, $fileName, $fullPath, $disk, $mime, $file->getSize(), $thumbnailUrls, $config
             );
 
             return new UploadResult(
@@ -82,7 +83,9 @@ final class StorageManager
             );
 
         } catch (\Exception $e) {
+            // ✅ Rollback both the main file AND all generated thumbnails
             $this->rollbackFile($disk, $fullPath);
+            $this->rollbackThumbnails($disk, $thumbnailUrls);
             Log::error("File storage failed [{$originalName}]: " . $e->getMessage());
             throw new RuntimeException('Failed to store file: ' . $e->getMessage(), 0, $e);
         }
@@ -229,12 +232,16 @@ final class StorageManager
     /**
      * Writes a record to the database when database tracking is enabled.
      *
+     * Wrapped in a DB transaction to prevent orphaned file records when
+     * the insert fails after the physical file has already been written.
+     *
      * @param string  $originalName
      * @param string  $fileName
      * @param string  $fullPath
      * @param string  $disk
      * @param string  $mime
      * @param int|null $size
+     * @param array   $thumbnails Map of generated thumbnail size => URL
      * @param array   $config
      * @return int|null The ID of the created record, or null when DB is disabled
      */
@@ -245,6 +252,7 @@ final class StorageManager
         string  $disk,
         string  $mime,
         ?int    $size,
+        array   $thumbnails,
         array   $config,
     ): ?int {
         if (!($config['database']['enabled'] ?? false)) {
@@ -253,16 +261,24 @@ final class StorageManager
 
         $model = $config['database']['model'];
 
-        $record = $model::create([
-            'original_name' => $originalName,
-            'name'          => $fileName,
-            'path'          => $fullPath,
-            'disk'          => $disk,
-            'mime_type'     => $mime,
-            'size'          => $size,
-            'type'          => $this->mimeResolver->toFileType($mime),
-            'user_id'       => auth()->id(),
-        ]);
+        // ✅ Wrap in transaction: if DB insert fails, the caller's catch block
+        // will rollback the already-written physical file and thumbnails.
+        $record = \Illuminate\Support\Facades\DB::transaction(
+            static function () use ($model, $originalName, $fileName, $fullPath, $disk, $mime, $size, $thumbnails) {
+                return $model::create([
+                    'original_name' => $originalName,
+                    'name'          => $fileName,
+                    'path'          => $fullPath,
+                    'disk'          => $disk,
+                    'mime_type'     => $mime,
+                    'size'          => $size,
+                    'type'          => (new \MohamedSamy902\AdvancedFileUpload\Services\MimeTypeResolver())->toFileType($mime),
+                    'user_id'       => auth()->id(),
+                    'is_used'       => false,
+                    'metadata'      => empty($thumbnails) ? null : ['thumbnails' => $thumbnails],
+                ]);
+            }
+        );
 
         return $record->id;
     }
@@ -308,6 +324,8 @@ final class StorageManager
     /**
      * Deletes a file directly by its storage path without consulting the database.
      *
+     * Also removes associated thumbnails when thumbnails are enabled.
+     *
      * @param string $path
      * @param array  $config
      * @return array{status: bool, message: string}
@@ -321,6 +339,12 @@ final class StorageManager
         }
 
         Storage::disk($disk)->delete($path);
+
+        // ✅ Fixed: also clean thumbnails when deleting by path
+        if ($config['thumbnails']['enabled'] ?? false) {
+            $fileName = basename($path);
+            $this->deleteThumbnails($disk, $path, $fileName, $config);
+        }
 
         Log::info("File deleted from storage: {$path}.");
 
@@ -410,6 +434,31 @@ final class StorageManager
     {
         if (Storage::disk($disk)->exists($path)) {
             Storage::disk($disk)->delete($path);
+        }
+    }
+
+    /**
+     * Removes all thumbnail files that were generated before a failure.
+     *
+     * Called during rollback when DB persistence fails after thumbnails
+     * have already been written to disk.
+     *
+     * @param string $disk
+     * @param array<string, string> $thumbnailUrls Map of size name => URL
+     */
+    private function rollbackThumbnails(string $disk, array $thumbnailUrls): void
+    {
+        foreach ($thumbnailUrls as $url) {
+            // Reconstruct the path from the URL by stripping the public prefix
+            $relativePath = ltrim(parse_url($url, PHP_URL_PATH), '/');
+            // Try to find and delete the file — ignore if already gone
+            try {
+                if (Storage::disk($disk)->exists($relativePath)) {
+                    Storage::disk($disk)->delete($relativePath);
+                }
+            } catch (\Exception) {
+                // Silently ignore — best-effort cleanup
+            }
         }
     }
 }

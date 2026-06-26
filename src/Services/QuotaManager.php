@@ -64,6 +64,11 @@ final class QuotaManager implements QuotaManagerContract
         $keyColumn  = $config['key_column'] ?? 'user_id';
         $modelClass = config('file-upload.database.model');
 
+        // ✅ Fixed: if DB tracking is disabled, return zero usage instead of crashing
+        if (!config('file-upload.database.enabled', false)) {
+            return new QuotaInfo(used: 0, limit: $limit, remaining: $limit, percentage: 0.0);
+        }
+
         $used      = (int) $modelClass::where($keyColumn, $userId)->sum('size');
         $remaining = max(0, $limit - $used);
         $percentage = $limit > 0 ? round($used / $limit, 4) : 0.0;

@@ -44,24 +44,43 @@ class AdvancedFileUploadServiceProvider extends ServiceProvider
     }
 
     /**
-     * Publishes package assets and loads view paths.
+     * Publishes package assets and loads view/route paths.
      */
     public function boot(): void
     {
+        // Config is always publishable
         $this->publishes([
             __DIR__ . '/../config/file-upload.php' => config_path('file-upload.php'),
         ], 'config');
 
+        // Assets are always publishable (not gated by runningInConsole)
+        $this->publishes([
+            __DIR__ . '/../resources/js/advanced-file-upload.js'   => public_path('vendor/advanced-file-upload/advanced-file-upload.js'),
+            __DIR__ . '/../resources/css/advanced-file-upload.css' => public_path('vendor/advanced-file-upload/advanced-file-upload.css'),
+        ], 'assets');
+
+        // Views are always publishable
+        $this->publishes([
+            __DIR__ . '/../resources/views/advanced-file-upload' =>
+                resource_path('views/vendor/advanced-file-upload'),
+        ], 'views');
+
         if ($this->app->runningInConsole()) {
             $this->publishMigrations();
-            $this->publishAssets();
-            $this->publishViews();
+            $this->commands([
+                \MohamedSamy902\AdvancedFileUpload\Console\Commands\PruneUnusedFiles::class,
+            ]);
         }
 
         $this->loadViewsFrom(
             __DIR__ . '/../resources/views/advanced-file-upload',
             'advanced-file-upload'
         );
+
+        // Load the dashboard UI routes
+        if (file_exists(__DIR__ . '/../routes/web.php')) {
+            $this->loadRoutesFrom(__DIR__ . '/../routes/web.php');
+        }
     }
 
     /**
@@ -128,6 +147,9 @@ class AdvancedFileUploadServiceProvider extends ServiceProvider
 
     /**
      * Publishes the package migration files to the application's migrations directory.
+     *
+     * Uses a sequenced suffix (_01, _02) to guarantee correct execution order
+     * even when both migrations share the same timestamp prefix.
      */
     private function publishMigrations(): void
     {
@@ -135,31 +157,9 @@ class AdvancedFileUploadServiceProvider extends ServiceProvider
 
         $this->publishes([
             __DIR__ . '/../database/migrations/create_file_uploads_table.php' =>
-                database_path("migrations/{$timestamp}_create_file_uploads_table.php"),
+                database_path("migrations/{$timestamp}_01_create_file_uploads_table.php"),
             __DIR__ . '/../database/migrations/create_upload_sessions_table.php' =>
-                database_path("migrations/{$timestamp}_create_upload_sessions_table.php"),
+                database_path("migrations/{$timestamp}_02_create_upload_sessions_table.php"),
         ], 'migrations');
-    }
-
-    /**
-     * Publishes front-end JavaScript and CSS assets to the public directory.
-     */
-    private function publishAssets(): void
-    {
-        $this->publishes([
-            __DIR__ . '/../resources/js/advanced-file-upload.js'   => public_path('vendor/advanced-file-upload/advanced-file-upload.js'),
-            __DIR__ . '/../resources/css/advanced-file-upload.css' => public_path('vendor/advanced-file-upload/advanced-file-upload.css'),
-        ], 'public');
-    }
-
-    /**
-     * Publishes Blade view stubs to the application's resources directory.
-     */
-    private function publishViews(): void
-    {
-        $this->publishes([
-            __DIR__ . '/../resources/views/advanced-file-upload/upload.blade.php' =>
-                resource_path('views/vendor/advanced-file-upload/upload.blade.php'),
-        ], 'views');
     }
 }
