@@ -16,6 +16,15 @@ interface FileUploadContract
     public function upload(mixed $source, array $options = []): UploadResult|array;
 
     /**
+     * Upload one or more files from a remote URL.
+     *
+     * @param string|array<string> $url
+     * @param array $options
+     * @return UploadResult|array<UploadResult|array>
+     */
+    public function uploadFromUrl(string|array $url, array $options = []): UploadResult|array;
+
+    /**
      * Delete a file or multiple files by ID, path, or array of IDs/paths.
      *
      * @param  int|string|array<int,int|string>  $idOrPath

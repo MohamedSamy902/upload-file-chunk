@@ -5,7 +5,7 @@ A production-ready Laravel package for chunked uploads, image processing, URL do
 [![PHP](https://img.shields.io/badge/PHP-8.1%2B-blue.svg)](https://php.net)
 [![Laravel](https://img.shields.io/badge/Laravel-10%20|%2011%20|%2012%20|%2013-red.svg)](https://laravel.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://github.com/MohamedSamy902/uplade-file-chunk/actions/workflows/tests.yml/badge.svg)](https://github.com/MohamedSamy902/uplade-file-chunk/actions)
+[![Tests](https://github.com/MohamedSamy902/upload-file-chunk/actions/workflows/tests.yml/badge.svg)](https://github.com/MohamedSamy902/upload-file-chunk/actions)
 
 ## Contents
 
@@ -187,6 +187,8 @@ $url  = $result['url'];     // still works
 Pass an array of files. Failed items return an error array without interrupting the batch.
 
 ```php
+use MohamedSamy902\AdvancedFileUpload\ValueObjects\UploadResult;
+
 $files   = $request->file('documents');
 $results = FileUpload::upload($files, [
     'folder_name'      => 'reports',
@@ -194,7 +196,7 @@ $results = FileUpload::upload($files, [
 ]);
 
 foreach ($results as $result) {
-    if ($result instanceof \MohamedSamy902\AdvancedFileUpload\ValueObjects\UploadResult) {
+    if ($result instanceof UploadResult) {
         // success
         echo $result->url;
     } else {
@@ -211,8 +213,7 @@ foreach ($results as $result) {
 Download a remote file and store it, with SSRF protection applied before any HTTP request.
 
 ```php
-$result = FileUpload::upload([], [
-    'url'         => 'https://cdn.example.com/photo.jpg',
+$result = FileUpload::uploadFromUrl('https://cdn.example.com/photo.jpg', [
     'folder_name' => 'avatars',
 ]);
 ```
@@ -220,12 +221,11 @@ $result = FileUpload::upload([], [
 Multiple URLs in a single call:
 
 ```php
-$results = FileUpload::upload([], [
-    'url' => [
-        'https://cdn.example.com/image1.jpg',
-        'https://cdn.example.com/image2.jpg',
-        'https://cdn.example.com/image3.jpg',
-    ],
+$results = FileUpload::uploadFromUrl([
+    'https://cdn.example.com/image1.jpg',
+    'https://cdn.example.com/image2.jpg',
+    'https://cdn.example.com/image3.jpg',
+], [
     'folder_name' => 'gallery',
 ]);
 ```
@@ -452,7 +452,7 @@ $article = Article::find(1);
 echo $article->getMediaUrl('image', 'original');
 
 // Get thumbnail size (must be enabled in config)
-echo $article->getMediaUrl('image', 'small'); 
+echo $article->getMediaUrl('image', 'sm'); 
 
 // Get an array of all thumbnails for the model's latest image
 $thumbs = $article->getThumbnails();
@@ -462,10 +462,14 @@ $thumbs = $article->getThumbnails();
 
 ## Media Manager Dashboard (SPA)
 
+![Media Manager UI Dashboard](https://raw.githubusercontent.com/MohamedSamy902/upload-file-chunk/main/art/dashboard-preview.png)
+
 The package ships with a **Production-Ready, Enterprise-grade Single Page Application (SPA)** dashboard for tracking uploads, checking disk space, identifying unused orphaned files, and configuring settings safely.
 
 Once installed and the config `database.enabled` is `true`, simply navigate to:
 **`your-app.com/advanced-file-upload`**
+
+> **Note on Security:** By default, the dashboard uses the `web` middleware. To secure it, add your authentication middleware (e.g., `auth`, `admin`) to the `ui.middleware` array in `config/file-upload.php`.
 
 ### Features:
 - ⚡ **PJAX Powered:** Blazing fast, zero-reload navigation. Search inputs and filters preserve your cursor focus instantly.

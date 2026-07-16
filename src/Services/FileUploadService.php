@@ -89,6 +89,20 @@ class FileUploadService implements FileUploadContract
     }
 
     /**
+     * Uploads one or more files from a remote URL.
+     *
+     * @param string|array $url
+     * @param array $options
+     * @return UploadResult|array<int, UploadResult|array<string, mixed>>
+     */
+    #[\Override]
+    public function uploadFromUrl(string|array $url, array $options = []): UploadResult|array
+    {
+        $options['url'] = $url;
+        return $this->upload(null, $options);
+    }
+
+    /**
      * Deletes a file or a batch of files.
      *
      * Accepts an integer database record ID, a storage path string, or an array
