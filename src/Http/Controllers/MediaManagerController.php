@@ -297,7 +297,13 @@ class MediaManagerController extends Controller
         // Remove thumbnails if they exist in metadata
         $thumbnails = $file->metadata['thumbnails'] ?? [];
         foreach ($thumbnails as $url) {
-            $relativePath = ltrim(parse_url($url, PHP_URL_PATH), '/');
+            $path = parse_url($url, PHP_URL_PATH) ?? '';
+            $relativePath = ltrim($path, '/');
+            
+            if ($file->disk === 'public' && str_starts_with($relativePath, 'storage/')) {
+                $relativePath = substr($relativePath, 8);
+            }
+
             if (Storage::disk($file->disk)->exists($relativePath)) {
                 Storage::disk($file->disk)->delete($relativePath);
             }
