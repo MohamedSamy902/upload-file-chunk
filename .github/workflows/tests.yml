@@ -57,7 +57,7 @@ jobs:
           composer update --prefer-stable --prefer-dist --no-interaction
 
       - name: Run tests
-        run: vendor/bin/phpunit --colors=always --fail-on-deprecation=false
+        run: vendor/bin/phpunit --colors=always
 
       - name: Upload coverage
         if: matrix.php == '8.3' && matrix.laravel == '12.*'
